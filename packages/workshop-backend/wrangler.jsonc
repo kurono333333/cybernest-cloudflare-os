@@ -32,6 +32,10 @@
     "nodejs_compat"
   ],
 
+  "vars": {
+    "CYBERNEST_PRIVATE_MANAGER_RUNTIME": "true"
+  },
+
   // Wrangler will launch a Chrome instance locally to emulate the Browser Run API during
   // local development. Add "remote": true to use a remote browser running on Cloudflare instead.
   "browser": {
