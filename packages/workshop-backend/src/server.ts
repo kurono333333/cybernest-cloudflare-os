@@ -67,6 +67,22 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
   FLAGS?: Flagship;
+  // Cybernest uses the Workshop only as a private Manager-scoped Worker. The starter wrapper sets
+  // this flag and leaves no public route or workers.dev route pointing at the Workshop.
+  CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+}
+
+const CYBERNEST_MANAGER_HEADER = "X-Cybernest-Manager-Id";
+const CYBERNEST_MANAGER_UUID =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function cybernestManagerId(req: Request): string | null {
+  const value = req.headers.get(CYBERNEST_MANAGER_HEADER);
+  return value !== null && CYBERNEST_MANAGER_UUID.test(value) ? value : null;
+}
+
+function isCybernestPrivateRuntime(env: Env): boolean {
+  return env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
 }
 
 // =======================================================================================
@@ -605,6 +621,105 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
   });
 }
 
+type CybernestManagerLookup =
+    | { _tag: "ready", user: DurableObjectStub<UserDurableObject> }
+    | { _tag: "absent" }
+    | { _tag: "failed" };
+
+async function lookupCybernestManager(
+    ctx: ExecutionContext, managerId: string): Promise<CybernestManagerLookup> {
+  try {
+    const id = ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = ctx.exports.UserDurableObject.get(id);
+    const profile = await user.whoamiIfExists();
+    if (profile === null) return {_tag: "absent"};
+    if (profile.type !== "user" || profile.id !== managerId) return {_tag: "failed"};
+    return {_tag: "ready", user};
+  } catch {
+    return {_tag: "failed"};
+  }
+}
+
+async function handleCybernestManagerEndpoint(
+    req: Request, ctx: ExecutionContext): Promise<Response> {
+  const managerId = cybernestManagerId(req);
+  if (managerId === null) return new Response(null, {status: 400});
+
+  if (req.method === "GET") {
+    const result = await lookupCybernestManager(ctx, managerId);
+    if (result._tag === "absent") return new Response(null, {status: 404});
+    if (result._tag === "failed") return new Response(null, {status: 503});
+    return new Response(null, {status: 204});
+  }
+
+  if (req.method === "POST") {
+    try {
+      const id = ctx.exports.UserDurableObject.idFromName(managerId);
+      const user = ctx.exports.UserDurableObject.get(id);
+      await user.ensureCybernestManager(managerId);
+      const profile = await user.whoamiIfExists();
+      if (profile === null || profile.type !== "user" || profile.id !== managerId) {
+        return new Response(null, {status: 503});
+      }
+      return new Response(null, {status: 204});
+    } catch {
+      return new Response(null, {status: 503});
+    }
+  }
+
+  return new Response(null, {status: 404});
+}
+
+async function handleCybernestPrivateApi(
+  req: Request, env: Env, ctx: ExecutionContext, managerId: string): Promise<Response> {
+  if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response(null, {status: 400});
+  }
+
+  const manager = await lookupCybernestManager(ctx, managerId);
+  if (manager._tag !== "ready") {
+    return new Response(null, {status: 503});
+  }
+
+  // Keep the same native Cap'n Web transport and AuthenticatedApi implementation used by the
+  // upstream Workshop. Cybernest supplies the already-owned User DO; it does not duplicate the
+  // public authentication protocol or query the DO's SQLite state.
+  let resp: Response | undefined;
+  let aborted = false;
+  const abortSession = (reason: Error) => {
+    logger.warn("aborting private manager api session", {
+      event: "session.abort",
+      error: reason,
+    });
+    aborted = true;
+    resp?.webSocket?.close();
+  };
+
+  resp = await newWorkersRpcResponse(
+      req, new AuthenticatedApiImpl(ctx, env, manager.user, abortSession));
+  if (aborted) resp?.webSocket?.close();
+  return resp;
+}
+
+async function handleCybernestPrivateRuntimeRequest(
+    req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
+
+  if (url.pathname === "/_cybernest/manager") {
+    return handleCybernestManagerEndpoint(req, ctx);
+  }
+
+  if (url.pathname === "/api") {
+    const managerId = cybernestManagerId(req);
+    if (managerId === null) {
+      return new Response(null, {status: 400});
+    }
+    return handleCybernestPrivateApi(req, env, ctx, managerId);
+  }
+
+  return new Response(null, {status: 404});
+}
+
 // Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client awaits the login
 // result through a capability (this stub) rather than a guessable id — no login id is ever exposed
 // to the client. Disposing the stub (e.g. when the pop-up closes or the component unmounts) cancels
@@ -780,6 +895,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    if (isCybernestPrivateRuntime(env)) {
+      return handleCybernestPrivateRuntimeRequest(req, env, ctx);
+    }
+
     let url = new URL(req.url);
 
     if (url.pathname === SITE_LOGO_PATH) {

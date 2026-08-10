@@ -441,6 +441,26 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.profile.get();
   }
 
+  // Initialize the User DO for Cybernest's manager-derived identity. The caller validates the
+  // manager ID before reaching this DO; keeping the comparison here makes the operation
+  // idempotent without allowing a later request to overwrite an existing profile.
+  async ensureCybernestManager(managerId: string): Promise<void> {
+    if (!this.storage.created.get()) {
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: "Manager",
+        id: managerId,
+      });
+      return;
+    }
+
+    const profile = this.storage.profile.get();
+    if (profile.type !== "user" || profile.id !== managerId) {
+      throw new Error("Cybernest manager profile does not match the User DO identity.");
+    }
+  }
+
   // Called by the overseer every time a collaborator opens a shared gadget.
   // Creates the record on first open; updates lastActive on subsequent opens.
   //
