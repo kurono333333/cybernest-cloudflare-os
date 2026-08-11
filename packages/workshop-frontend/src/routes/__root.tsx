@@ -2,10 +2,12 @@ import { logRpcFailure } from '../rpcErrors'
 import { useState, useEffect } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
-import { RpcStub } from 'capnweb'
-import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { useRpcStub, useConnectionLost } from '../RpcContext'
-import { markConnectionRestored } from '../main'
+import type { RpcStub } from 'capnweb'
+import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import {
+  useRpcContext,
+  type RpcContextValue,
+} from '../RpcContext'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
@@ -14,6 +16,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { isCybernestPublicRoute, logoutCybernest } from '../cybernest'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -28,15 +31,30 @@ function ConnectionLostBanner() {
 }
 
 function RootComponent() {
-  const rpcStub = useRpcStub()
-  const connectionLost = useConnectionLost()
+  const rpcContext = useRpcContext()
+
+  if (rpcContext.kind === 'authenticated') {
+    return <CybernestRoot rpcContext={rpcContext} />
+  }
+
+  return <PublicRoot rpcContext={rpcContext} />
+}
+
+function PublicRoot({
+  rpcContext,
+}: {
+  rpcContext: Extract<RpcContextValue, { kind: 'public' }>
+}) {
+  const rpcStub = rpcContext.stub
+  const connectionLost = rpcContext.connectionLost
+  const { markConnectionRestored } = rpcContext
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
   // When authenticatedApi becomes available, the connection is proven alive.
   useEffect(() => {
     if (authenticatedApi) markConnectionRestored()
-  }, [authenticatedApi])
+  }, [authenticatedApi, markConnectionRestored])
 
   // Routes that don't require auth (public routes)
   const isSignup = pathname === '/signup'
@@ -124,6 +142,46 @@ function RootComponent() {
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               connectionLost={connectionLost}
+              isWorkspaceEditor={isWorkspaceEditor}
+            />
+          </Toasty>
+        </TooltipProvider>
+      </FeatureFlagsProvider>
+    </AuthProvider>
+  )
+}
+
+function CybernestRoot({
+  rpcContext,
+}: {
+  rpcContext: Extract<RpcContextValue, { kind: 'authenticated' }>
+}) {
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const { markConnectionRestored } = rpcContext
+  const isPublicApiOnlyRoute = isCybernestPublicRoute(pathname)
+  const isWorkspaceEditor = pathname.startsWith('/workspace/') || pathname.startsWith('/gadget/')
+
+  useEffect(() => {
+    markConnectionRestored()
+  }, [markConnectionRestored, rpcContext.stub])
+
+  useEffect(() => {
+    if (isPublicApiOnlyRoute) window.location.assign('/')
+  }, [isPublicApiOnlyRoute])
+
+  if (isPublicApiOnlyRoute) return null
+
+  return (
+    <AuthProvider
+      authenticatedApi={rpcContext.stub}
+      onLogout={() => logoutCybernest(rpcContext.stub)}
+    >
+      <FeatureFlagsProvider>
+        <TooltipProvider>
+          <Toasty>
+            <AuthenticatedShell
+              authenticatedApi={rpcContext.stub}
+              connectionLost={rpcContext.connectionLost}
               isWorkspaceEditor={isWorkspaceEditor}
             />
           </Toasty>

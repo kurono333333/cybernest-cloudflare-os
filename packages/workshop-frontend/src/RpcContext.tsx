@@ -1,18 +1,34 @@
 import { createContext, useContext } from 'react'
-import { RpcStub } from 'capnweb'
-import { PublicApi } from '@gadgets/workshop-shared/api'
+import type { RpcStub } from 'capnweb'
+import type { AuthenticatedApi, PublicApi } from '@gadgets/workshop-shared/api'
 
-// Context to provide the RPC stub and connection state throughout the app.
-// The stub is wrapped in an object to avoid React's callable-state-setter issue.
-export const RpcContext = createContext<{ stub: RpcStub<PublicApi>; connectionLost: boolean } | null>(null)
+type RpcConnectionState = {
+  readonly connectionLost: boolean
+  readonly markConnectionRestored: () => void
+}
+
+export type RpcContextValue = RpcConnectionState & (
+  | { readonly kind: 'public'; readonly stub: RpcStub<PublicApi> }
+  | { readonly kind: 'authenticated'; readonly stub: RpcStub<AuthenticatedApi> }
+)
+
+// Context to provide the exact RPC capability and connection state throughout the app.
+export const RpcContext = createContext<RpcContextValue | null>(null)
+
+export function useRpcContext(): RpcContextValue {
+  const ctx = useContext(RpcContext)
+  if (!ctx) throw new Error('useRpcContext must be used within RpcContext.Provider')
+  return ctx
+}
 
 export function useRpcStub(): RpcStub<PublicApi> {
-  const ctx = useContext(RpcContext)
-  if (!ctx) throw new Error('useRpcStub must be used within RpcContext.Provider')
+  const ctx = useRpcContext()
+  if (ctx.kind !== 'public') {
+    throw new Error('useRpcStub is only available for the PublicApi connection')
+  }
   return ctx.stub
 }
 
 export function useConnectionLost(): boolean {
-  const ctx = useContext(RpcContext)
-  return ctx?.connectionLost ?? false
+  return useRpcContext().connectionLost
 }
