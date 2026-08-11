@@ -635,7 +635,11 @@ async function lookupCybernestManager(
     if (profile === null) return {_tag: "absent"};
     if (profile.type !== "user" || profile.id !== managerId) return {_tag: "failed"};
     return {_tag: "ready", user};
-  } catch {
+  } catch (error) {
+    logger.warn("failed to look up Cybernest Manager", {
+      event: "manager.lookup_failed",
+      error,
+    });
     return {_tag: "failed"};
   }
 }
@@ -662,7 +666,11 @@ async function handleCybernestManagerEndpoint(
         return new Response(null, {status: 503});
       }
       return new Response(null, {status: 204});
-    } catch {
+    } catch (error) {
+      logger.warn("failed to ensure Cybernest Manager", {
+        event: "manager.ensure_failed",
+        error,
+      });
       return new Response(null, {status: 503});
     }
   }
