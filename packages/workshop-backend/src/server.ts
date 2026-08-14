@@ -67,7 +67,7 @@ interface ManagerKnowledgeCapability extends WorkerEntrypoint {
 export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
   async ensureManagerKnowledge(
     managerId: string,
-    capability: Fetcher<ManagerKnowledgeCapability>,
+    capability: ManagerKnowledgeCapability,
   ): Promise<void> {
     if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
       throw new TypeError("Manager ID must be a UUID.");
