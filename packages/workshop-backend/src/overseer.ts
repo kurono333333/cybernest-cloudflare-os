@@ -1359,6 +1359,12 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  isCybernestPrivateRuntime(): boolean {
+    return (this.env as Cloudflare.Env & {
+      CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+    }).CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
+  }
+
   // =======================================================================================
   // Multi-gadget workspace helpers: storage migration, the gadget registry, and
   // defaultGadgetId resolution.
@@ -6382,6 +6388,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     let isOwner = (userId == this.impl.ownerId);
 
+    if (this.impl.isCybernestPrivateRuntime() && !isOwner) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {
       this.impl.ownerProfileId = profileId;
@@ -6499,6 +6509,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async receiveExternalMessage(
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      return {
+        accepted: false,
+        message: "This Manager runtime is private, so external messages are disabled.",
+      };
+    }
+
     if (!input.prompt.trim()) {
       return { accepted: false, message: "Please include a prompt." };
     }
@@ -8634,6 +8651,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
@@ -8662,6 +8683,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    if (this.impl.isCybernestPrivateRuntime() && keepUsers.length > 0) {
+      throw new Error("A private Manager runtime cannot keep shared users.");
+    }
+
     let affected = (await this.impl.getSharingManager())
         .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
@@ -8684,6 +8709,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    if (this.impl.isCybernestPrivateRuntime() && keepUsers.length > 0) {
+      throw new Error("A private Manager runtime cannot keep shared users.");
+    }
+
     let affected = (await this.impl.getSharingManager())
         .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
@@ -8701,6 +8730,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
@@ -8712,6 +8745,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +

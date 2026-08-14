@@ -15,6 +15,9 @@ import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
+const CYBERNEST_MANAGER_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
 const OUTPUTS_BACKFILL_PAGE = 16;
@@ -51,6 +54,44 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+
+type ManagerKnowledgeCapability = {
+  assertBoundTo(managerId: string): Promise<void>;
+};
+
+type ManagerKnowledgeAccountCreator = {
+  createManagerAccount(
+    managerId: string,
+    capability: ManagerKnowledgeCapability,
+  ): Promise<Fetcher<GatekeeperUser>>;
+};
+
+type ManagerKnowledgeAccountStub = {
+  describe(): Promise<AccountDescription>;
+  inspectManagerBinding(managerId: string): Promise<"legacy" | "bound">;
+};
+
+type ManagerKnowledgeAccountSlot = {
+  kind: "legacy" | "bound";
+  record: ConnectedAccountRecord;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isKnowledgeDescription(description: AccountDescription): boolean {
+  return description.singleton?.tsType === "KnowledgeBase";
+}
+
+function isLegacyKnowledgeDescription(description: AccountDescription): boolean {
+  return description.singleton?.tsType === "CustomSession";
+}
+
+function isManagerKnowledgeAccount(record: ConnectedAccountRecord): boolean {
+  return record.vendorId === "custom" &&
+      record.autoProvisioned === true && isKnowledgeDescription(record.description);
+}
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -277,6 +318,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  #knowledgeEnsurePromise?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -459,6 +501,143 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (profile.type !== "user" || profile.id !== managerId) {
       throw new Error("Cybernest manager profile does not match the User DO identity.");
     }
+  }
+
+  #validateManagerKnowledgeRecord(value: unknown, slotId: number): ConnectedAccountRecord {
+    if (!isRecord(value) || value.id !== slotId || typeof value.vendorId !== "string" ||
+        (typeof value.account !== "object" && typeof value.account !== "function") ||
+        !isRecord(value.description) || typeof value.description.displayName !== "string" ||
+        typeof value.description.url !== "string") {
+      throw new Error("Manager Knowledge integrity_failure: malformed connected account.");
+    }
+    return value as unknown as ConnectedAccountRecord;
+  }
+
+  async #readManagerKnowledgeAccountSlots(managerId: string): Promise<ManagerKnowledgeAccountSlot[]> {
+    let matches: ManagerKnowledgeAccountSlot[] = [];
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let raw: unknown;
+      try {
+        raw = this.storage.connectedAccounts.get(id);
+      } catch (error) {
+        throw new Error("Manager Knowledge integrity_failure: unreadable connected account.", {
+          cause: error,
+        });
+      }
+      if (raw === undefined) continue;
+
+      let record = this.#validateManagerKnowledgeRecord(raw, id);
+      if (record.vendorId !== "custom") continue;
+
+      let isKnowledge = isKnowledgeDescription(record.description);
+      let isLegacy = isLegacyKnowledgeDescription(record.description);
+      if (!isKnowledge && !isLegacy) {
+        throw new Error("Manager Knowledge integrity_failure: unexpected custom account.");
+      }
+
+      let binding = await (record.account as unknown as ManagerKnowledgeAccountStub)
+          .inspectManagerBinding(managerId);
+      if (binding === "bound") {
+        if (!isKnowledge || record.autoProvisioned !== true) {
+          throw new Error("Manager Knowledge integrity_failure: malformed bound account.");
+        }
+        matches.push({ kind: "bound", record });
+      } else if (binding === "legacy") {
+        matches.push({ kind: "legacy", record });
+      } else {
+        throw new Error("Manager Knowledge integrity_failure: invalid account binding state.");
+      }
+    }
+
+    if (matches.length > 1) {
+      throw new Error("Manager Knowledge integrity_failure: duplicate connected account.");
+    }
+    return matches;
+  }
+
+  async #createManagerKnowledgeAccount(
+    managerId: string,
+    capability: ManagerKnowledgeCapability,
+  ): Promise<{ account: Fetcher<GatekeeperUser>; description: AccountDescription }> {
+    let vendor = this.vendors.get("custom");
+    if (!vendor) throw new Error("Manager Knowledge integrity_failure: custom vendor is missing.");
+
+    let creator = vendor as unknown as ManagerKnowledgeAccountCreator;
+    if (typeof creator.createManagerAccount !== "function") {
+      throw new Error("Manager Knowledge integrity_failure: custom vendor is not compatible.");
+    }
+
+    let account = await creator.createManagerAccount(managerId, capability);
+    if (typeof account !== "object" && typeof account !== "function") {
+      throw new Error("Manager Knowledge integrity_failure: custom account is malformed.");
+    }
+    let description = await account.describe();
+    if (!isKnowledgeDescription(description)) {
+      throw new Error("Manager Knowledge integrity_failure: custom account is not Knowledge.");
+    }
+    let binding = await (account as unknown as ManagerKnowledgeAccountStub)
+        .inspectManagerBinding(managerId);
+    if (binding !== "bound") {
+      throw new Error("Manager Knowledge integrity_failure: created account is not bound.");
+    }
+    return { account, description };
+  }
+
+  async #discardManagerKnowledgeAccount(account: Fetcher<GatekeeperUser>): Promise<void> {
+    try {
+      await account.revoke();
+    } catch (error) {
+      logger.warn("failed to discard duplicate Manager Knowledge account", {
+        event: "manager.knowledge.account.discard.failed", error,
+      });
+    }
+  }
+
+  ensureKnowledgeAccount(capability: ManagerKnowledgeCapability): Promise<void> {
+    return (this.#knowledgeEnsurePromise ??=
+      this.#ensureKnowledgeAccount(capability).finally(() => {
+        this.#knowledgeEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureKnowledgeAccount(capability: ManagerKnowledgeCapability): Promise<void> {
+    if (!this.storage.created.get()) {
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    }
+    let profile = this.storage.profile.get();
+    if (profile.type !== "user" || !CYBERNEST_MANAGER_UUID.test(profile.id)) {
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    }
+    await capability.assertBoundTo(profile.id);
+
+    let existing = await this.#readManagerKnowledgeAccountSlots(profile.id);
+    if (existing[0]?.kind === "bound") return;
+
+    let created = await this.#createManagerKnowledgeAccount(profile.id, capability);
+
+    // The RPCs above release the User DO input gate. Re-read every slot before persisting so a
+    // concurrent invocation cannot create a second singleton or overwrite a newly-created record.
+    existing = await this.#readManagerKnowledgeAccountSlots(profile.id);
+    if (existing[0]?.kind === "bound") {
+      await this.#discardManagerKnowledgeAccount(created.account);
+      return;
+    }
+
+    this.ctx.storage.transactionSync(() => {
+      let accountId = this.storage.nextAccountId.get();
+      this.storage.nextAccountId.put(accountId + 1);
+      this.storage.connectedAccounts.put({
+        id: accountId,
+        account: created.account,
+        description: created.description,
+        vendorId: "custom",
+        autoProvisioned: true,
+      });
+      if (existing[0]?.kind === "legacy") {
+        this.storage.connectedAccounts.delete(existing[0].record.id);
+      }
+    });
   }
 
   // Called by the overseer every time a collaborator opens a shared gadget.
@@ -1316,6 +1495,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
+      if (isManagerKnowledgeAccount(rec)) {
+        result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+        continue;
+      }
       if (!rec.description.singleton && !rec.description.providesUi) continue;
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
@@ -1371,6 +1554,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
     async function notifyAdd(record: ConnectedAccountRecord) {
+      // The Manager Knowledge account is an OS-owned ambient singleton. It is visible to the
+      // agent through listProvidedAccounts(), but never appears as a user connector.
+      if (isManagerKnowledgeAccount(record)) return;
+
       // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
       // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
       // nothing to manage, and "disabled" ones are dormant, so both are hidden.
@@ -1478,6 +1665,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async disconnectAccount(accountId: number): Promise<void> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
+      if (isManagerKnowledgeAccount(account)) {
+        throw new Error("The Manager Knowledge account is owned by the Manager and can't be disconnected.");
+      }
       if (account.autoProvisioned) {
         // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
         if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {

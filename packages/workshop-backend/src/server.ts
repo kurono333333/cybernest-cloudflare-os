@@ -21,7 +21,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -51,6 +51,36 @@ export { AdminSettings };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
+
+// Private Manager-scoped capability view. The bridge only needs the installation check; the
+// User DO and the custom account keep the rest of the capability opaque and forward it unchanged.
+interface ManagerKnowledgeCapability extends WorkerEntrypoint {
+  assertBoundTo(managerId: string): Promise<void>;
+}
+
+/**
+ * Native RPC entrypoint used by Core to install a Manager-bound Knowledge account in the OS.
+ * This is intentionally separate from the HTTP Manager endpoint: Core supplies the opaque
+ * capability, and the OS never reconstructs authority from a header or a user-provided ID.
+ */
+@validateRpc()
+export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
+  async ensureManagerKnowledge(
+    managerId: string,
+    capability: Fetcher<ManagerKnowledgeCapability>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
+      throw new TypeError("Manager ID must be a UUID.");
+    }
+
+    await capability.assertBoundTo(managerId);
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    await user.ensureCybernestManager(managerId);
+    await user.ensureKnowledgeAccount(capability);
+  }
+}
 
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,

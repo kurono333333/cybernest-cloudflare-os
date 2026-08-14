@@ -1,4 +1,4 @@
-import { exports } from "cloudflare:workers";
+import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
 import { describe, expect, it } from "vitest";
@@ -149,5 +149,56 @@ describe("Cybernest Manager runtime", () => {
 
     const publicRoot = await exports.default.fetch(new Request("https://workshop.invalid/"));
     expect(publicRoot.status).toBe(404);
+  });
+
+  it("keeps a Manager workspace owner-only and blocks share creation", async () => {
+    const ownerId = managerId();
+    const otherId = managerId();
+    await ensure(ownerId);
+    await ensure(otherId);
+
+    const ownerSession = await connect(ownerId);
+    let workspaceId: string | undefined;
+    try {
+      using workspace = await ownerSession.api.newGadget();
+      workspaceId = (await workspace.getMetadata()).id;
+    } finally {
+      close(ownerSession);
+    }
+
+    const ownerNotifyClosed = new NativeRpcStub<() => void>(() => {});
+    try {
+      const ownerOverseer = await exports.OverseerDurableObject
+        .get(exports.OverseerDurableObject.idFromString(workspaceId!))
+        .open(
+          exports.UserDurableObject.idFromName(ownerId).toString(),
+          ownerId,
+          ownerNotifyClosed,
+        );
+      try {
+        await expect(ownerOverseer.createShareLink("use")).rejects.toThrow(
+          "private and cannot be shared",
+        );
+      } finally {
+        ownerOverseer[Symbol.dispose]();
+      }
+    } finally {
+      ownerNotifyClosed[Symbol.dispose]();
+    }
+
+    const notifyClosed = new NativeRpcStub<() => void>(() => {});
+    try {
+      await expect(
+        exports.OverseerDurableObject
+          .get(exports.OverseerDurableObject.idFromString(workspaceId!))
+          .open(
+            exports.UserDurableObject.idFromName(otherId).toString(),
+            otherId,
+            notifyClosed,
+          ),
+      ).rejects.toMatchObject({ code: "WORKSPACE_ACCESS_DENIED" });
+    } finally {
+      notifyClosed[Symbol.dispose]();
+    }
   });
 });
