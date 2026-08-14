@@ -88,8 +88,16 @@ function isLegacyKnowledgeDescription(description: AccountDescription): boolean 
   return description.singleton?.tsType === "CustomSession";
 }
 
-function isManagerKnowledgeAccount(record: ConnectedAccountRecord): boolean {
-  return record.vendorId === "custom" &&
+export function isManagerKnowledgeAccount(
+  record: {
+    vendorId: string;
+    autoProvisioned?: boolean;
+    description: AccountDescription;
+  },
+  privateManagerRuntime: boolean,
+): boolean {
+  return privateManagerRuntime &&
+      record.vendorId === "custom" &&
       record.autoProvisioned === true && isKnowledgeDescription(record.description);
 }
 
@@ -1493,9 +1501,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
     await this.#ensureAutoProvisionedAccounts();
     let config = await readAdminConfig(this.env);
+    let privateManagerRuntime = this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
-      if (isManagerKnowledgeAccount(rec)) {
+      if (isManagerKnowledgeAccount(rec, privateManagerRuntime)) {
         result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
         continue;
       }
@@ -1547,6 +1556,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let seenIds = new Set<number>();
     let vendorDescriptions = new Map<string, Promise<VendorDescription>>();
+    let privateManagerRuntime = this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
 
     // Snapshot the admin config once for this subscription. Changes take effect when the client
     // re-subscribes (e.g. on reconnect), matching other deployment config.
@@ -1556,7 +1566,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     async function notifyAdd(record: ConnectedAccountRecord) {
       // The Manager Knowledge account is an OS-owned ambient singleton. It is visible to the
       // agent through listProvidedAccounts(), but never appears as a user connector.
-      if (isManagerKnowledgeAccount(record)) return;
+      if (isManagerKnowledgeAccount(record, privateManagerRuntime)) return;
 
       // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
       // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
@@ -1665,7 +1675,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async disconnectAccount(accountId: number): Promise<void> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
-      if (isManagerKnowledgeAccount(account)) {
+      if (isManagerKnowledgeAccount(
+        account,
+        this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true",
+      )) {
         throw new Error("The Manager Knowledge account is owned by the Manager and can't be disconnected.");
       }
       if (account.autoProvisioned) {
