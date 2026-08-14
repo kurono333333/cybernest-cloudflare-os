@@ -507,7 +507,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!isRecord(value) || value.id !== slotId || typeof value.vendorId !== "string" ||
         (typeof value.account !== "object" && typeof value.account !== "function") ||
         !isRecord(value.description) || typeof value.description.displayName !== "string" ||
-        typeof value.description.url !== "string") {
+        (value.description.url !== undefined && typeof value.description.url !== "string")) {
       throw new Error("Manager Knowledge integrity_failure: malformed connected account.");
     }
     return value as unknown as ConnectedAccountRecord;
