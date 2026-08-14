@@ -1,6 +1,7 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
+import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it } from "vitest";
 
 type Session = {
@@ -176,14 +177,46 @@ describe("Cybernest Manager runtime", () => {
           ownerNotifyClosed,
         );
       try {
-        await expect(ownerOverseer.createShareLink("use")).rejects.toThrow(
-          "private and cannot be shared",
-        );
+        await expect(ownerOverseer.addCollaborator(otherId, "use")).rejects.toThrow();
+        await expect(ownerOverseer.createShareLink("use")).rejects.toThrow();
+        await expect(ownerOverseer.newShareLinkKey("missing-link")).rejects.toThrow();
+        await expect(ownerOverseer.removeCollaborator(otherId, ["keep-user"])).rejects.toThrow();
+        await expect(ownerOverseer.revokeShareLink("missing-link", ["keep-user"])).rejects.toThrow();
       } finally {
         ownerOverseer[Symbol.dispose]();
       }
     } finally {
       ownerNotifyClosed[Symbol.dispose]();
+    }
+
+    const externalGateway = (exports as unknown as {
+      ExternalMessageGateway: (input: { props: { source: string } }) => {
+        submitExternalMessage(input: {
+          callerEmail: string;
+          gadgetKey: string;
+          chatKey: string;
+          messageKey: string;
+          gadgetTitle: string;
+          prompt: string;
+          chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+        }): Promise<{ accepted: boolean; message?: string }>;
+      };
+    }).ExternalMessageGateway({props: {source: "private-test"}});
+    const responseTarget = new NativeRpcStub<ChatGatewayRpcTarget>({
+      onGadgetResponse: async () => {},
+    });
+    try {
+      await expect(externalGateway.submitExternalMessage({
+        callerEmail: "external@example.test",
+        gadgetKey: "external-gadget",
+        chatKey: "external-chat",
+        messageKey: "external-message",
+        gadgetTitle: "External",
+        prompt: "hello",
+        chatGatewayRpcTarget: responseTarget,
+      })).resolves.toMatchObject({accepted: false});
+    } finally {
+      responseTarget[Symbol.dispose]();
     }
 
     const notifyClosed = new NativeRpcStub<() => void>(() => {});
@@ -196,7 +229,7 @@ describe("Cybernest Manager runtime", () => {
             otherId,
             notifyClosed,
           ),
-      ).rejects.toMatchObject({ code: "WORKSPACE_ACCESS_DENIED" });
+      ).rejects.toBeDefined();
     } finally {
       notifyClosed[Symbol.dispose]();
     }

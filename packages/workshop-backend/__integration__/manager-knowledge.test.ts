@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 type ManagerKnowledgeBridge = {
@@ -21,7 +22,11 @@ type ManagerKnowledgeUser = {
     vendorId: string;
     autoProvisioned?: boolean;
   }): Promise<void>;
-  listProvidedAccounts(): Promise<Array<{ vendorId: string; description: { singleton?: { tsType?: string } } }>>;
+  listProvidedAccounts(): Promise<Array<{
+    accountId: number;
+    vendorId: string;
+    description: { singleton?: { tsType?: string } };
+  }>>;
 };
 
 describe("Cybernest Manager Knowledge bridge", () => {
@@ -42,13 +47,18 @@ describe("Cybernest Manager Knowledge bridge", () => {
     await bridge.ensureManagerKnowledge(managerId, capability);
     await bridge.ensureManagerKnowledge(managerId, capability);
 
-    const accounts = await userNamespace.get(userNamespace.idFromName(managerId))
-      .listProvidedAccounts();
+    const user = userNamespace.get(userNamespace.idFromName(managerId));
+    const accounts = await user.listProvidedAccounts();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
       vendorId: "custom",
       description: { singleton: { tsType: "KnowledgeBase" } },
     });
+
+    await evictDurableObject(user);
+    await bridge.ensureManagerKnowledge(managerId, capability);
+
+    await expect(user.listProvidedAccounts()).resolves.toEqual(accounts);
   });
 
   it("replaces one legacy Custom account but refuses duplicate legacy slots", async () => {

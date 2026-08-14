@@ -11,6 +11,7 @@ const EXPECTED_OPEN_ERROR_CODES = new Set([
 const EXPECTED_MANAGER_KNOWLEDGE_ERRORS = new Set([
   "Manager Knowledge integrity_failure: duplicate connected account.",
   "This Manager runtime is private and cannot be shared.",
+  "A private Manager runtime cannot keep shared users.",
   "You don't have access to this workspace.",
   "The execution context which hosts this callback is no longer running.",
 ]);

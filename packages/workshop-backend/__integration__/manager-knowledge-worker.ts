@@ -10,6 +10,7 @@ export * from "../src/server.js";
 // Vitest's ctx.exports analyzer does not follow the production barrel re-export for entrypoints.
 export {
   GatekeeperConnectCallbackImpl,
+  ExternalMessageGateway,
   ManagerKnowledgeBridge,
   UserDurableObject,
 } from "../src/server.js";
