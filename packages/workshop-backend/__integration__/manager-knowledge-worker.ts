@@ -35,6 +35,14 @@ export class ManagerKnowledgeTestCapability
 }
 
 export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint {
+  async resetAccountCreations(): Promise<void> {
+    managerKnowledgeAccountCreations = 0;
+  }
+
+  async readAccountCreations(): Promise<number> {
+    return managerKnowledgeAccountCreations;
+  }
+
   async create(managerId: string): Promise<ManagerKnowledgeCapability> {
     let workerExports = this.ctx.exports as unknown as {
       ManagerKnowledgeTestCapability(input: { props: { managerId: string } }): ManagerKnowledgeCapability;

@@ -1,4 +1,5 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
@@ -7,6 +8,31 @@ import { describe, expect, it } from "vitest";
 type Session = {
   api: RpcStub<AuthenticatedApi>;
   socket: WebSocket;
+};
+
+type LegacySharingFixture = {
+  addCollaborator(input: {
+    caller: {profileId: string; isOwner: boolean};
+    profile: {type: "user"; id: string; name: string};
+    role: "use";
+    note?: string;
+  }): unknown;
+  createShareLink(input: {
+    caller: {profileId: string; isOwner: boolean};
+    role: "use";
+    note?: string;
+  }): Promise<{key: string; linkId: string}>;
+  isCollaborator(profileId: string): boolean;
+};
+
+type WorkspaceStorageFixture = {
+  impl: {
+    storage: {
+      ownerId: {get(): string | undefined};
+      chatMeta: {list(): Iterable<unknown>};
+      externalChats: {list(): Iterable<unknown>};
+    };
+  };
 };
 
 const managerId = (): string => crypto.randomUUID();
@@ -155,8 +181,10 @@ describe("Cybernest Manager runtime", () => {
   it("keeps a Manager workspace owner-only and blocks share creation", async () => {
     const ownerId = managerId();
     const otherId = managerId();
+    const shareRecipientId = managerId();
     await ensure(ownerId);
     await ensure(otherId);
+    await ensure(shareRecipientId);
 
     const ownerSession = await connect(ownerId);
     let workspaceId: string | undefined;
@@ -168,26 +196,120 @@ describe("Cybernest Manager runtime", () => {
     }
 
     const ownerNotifyClosed = new NativeRpcStub<() => void>(() => {});
+    let overseerStub = exports.OverseerDurableObject
+      .get(exports.OverseerDurableObject.idFromString(workspaceId!));
     try {
-      const ownerOverseer = await exports.OverseerDurableObject
-        .get(exports.OverseerDurableObject.idFromString(workspaceId!))
-        .open(
+      const ownerOverseer = await overseerStub.open(
           exports.UserDurableObject.idFromName(ownerId).toString(),
           ownerId,
           ownerNotifyClosed,
         );
       try {
-        await expect(ownerOverseer.addCollaborator(otherId, "use")).rejects.toThrow();
-        await expect(ownerOverseer.createShareLink("use")).rejects.toThrow();
-        await expect(ownerOverseer.newShareLinkKey("missing-link")).rejects.toThrow();
-        await expect(ownerOverseer.removeCollaborator(otherId, ["keep-user"])).rejects.toThrow();
-        await expect(ownerOverseer.revokeShareLink("missing-link", ["keep-user"])).rejects.toThrow();
+        await expect(ownerOverseer.addCollaborator(otherId, "use")).rejects.toThrow(
+          "This Manager runtime is private and cannot be shared.",
+        );
+        await expect(ownerOverseer.createShareLink("use")).rejects.toThrow(
+          "This Manager runtime is private and cannot be shared.",
+        );
+        await expect(ownerOverseer.newShareLinkKey("missing-link")).rejects.toThrow(
+          "This Manager runtime is private and cannot be shared.",
+        );
+        await expect(ownerOverseer.removeCollaborator(otherId, ["keep-user"])).rejects.toThrow(
+          "A private Manager runtime cannot keep shared users.",
+        );
+        await expect(
+          ownerOverseer.revokeShareLink("missing-link", ["keep-user"]),
+        ).rejects.toThrow("A private Manager runtime cannot keep shared users.");
+
+        // Seed pre-private-mode sharing state through the real SharingManager. Product RPCs above
+        // remain closed; this direct fixture represents records persisted by an older OS pin.
+        const legacyShare = await runInDurableObject(overseerStub, async (instance) => {
+          const sharing = await (instance as unknown as {
+            impl: {getSharingManager(): Promise<LegacySharingFixture>};
+          }).impl.getSharingManager();
+          const caller = {profileId: ownerId, isOwner: true};
+          sharing.addCollaborator({
+            caller,
+            profile: {type: "user", id: otherId, name: "Legacy collaborator"},
+            role: "use",
+            note: "legacy",
+          });
+          return sharing.createShareLink({caller, role: "use", note: "legacy"});
+        });
+
+        await expect(ownerOverseer.listCollaborators()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({profile: expect.objectContaining({id: otherId})}),
+          ]),
+        );
+        await expect(ownerOverseer.previewRemoveCollaborator(otherId)).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({profile: expect.objectContaining({id: otherId})}),
+          ]),
+        );
+        await expect(ownerOverseer.listShareLinks()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({linkId: legacyShare.linkId, note: "legacy"}),
+          ]),
+        );
+        await expect(ownerOverseer.previewRevokeShareLink(legacyShare.linkId)).resolves.toEqual([]);
+        await ownerOverseer.updateShareLink(legacyShare.linkId, "legacy updated");
+        await expect(ownerOverseer.listShareLinks()).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({linkId: legacyShare.linkId, note: "legacy updated"}),
+          ]),
+        );
+
+        const collaboratorNotifyClosed = new NativeRpcStub<() => void>(() => {});
+        try {
+          await expect(overseerStub.open(
+            exports.UserDurableObject.idFromName(otherId).toString(),
+            otherId,
+            collaboratorNotifyClosed,
+          )).rejects.toMatchObject({code: "WORKSPACE_ACCESS_DENIED"});
+        } finally {
+          collaboratorNotifyClosed[Symbol.dispose]();
+        }
+
+        const shareNotifyClosed = new NativeRpcStub<() => void>(() => {});
+        try {
+          await expect(overseerStub.open(
+            exports.UserDurableObject.idFromName(shareRecipientId).toString(),
+            shareRecipientId,
+            shareNotifyClosed,
+            legacyShare.key,
+          )).rejects.toMatchObject({code: "WORKSPACE_ACCESS_DENIED"});
+        } finally {
+          shareNotifyClosed[Symbol.dispose]();
+        }
+        await expect(runInDurableObject(overseerStub, async (instance) => {
+          const sharing = await (instance as unknown as {
+            impl: {getSharingManager(): Promise<LegacySharingFixture>};
+          }).impl.getSharingManager();
+          return sharing.isCollaborator(shareRecipientId);
+        })).resolves.toBe(false);
+
+        await expect(ownerOverseer.revokeShareLink(legacyShare.linkId, [])).resolves.toEqual([]);
+        await expect(ownerOverseer.removeCollaborator(otherId, [])).resolves.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({profile: expect.objectContaining({id: otherId})}),
+          ]),
+        );
       } finally {
         ownerOverseer[Symbol.dispose]();
       }
     } finally {
       ownerNotifyClosed[Symbol.dispose]();
     }
+
+    // Removing a legacy collaborator intentionally restarts the workspace after the response is
+    // delivered. Observe that reset before making further assertions against the same DO so the
+    // test cannot race the revocation timer.
+    await expect(runInDurableObject(overseerStub, async () => {
+      await new Promise(resolve => setTimeout(resolve, 1_000));
+    })).rejects.toMatchObject({durableObjectReset: true});
+    overseerStub = exports.OverseerDurableObject
+      .get(exports.OverseerDurableObject.idFromString(workspaceId!));
 
     const externalGateway = (exports as unknown as {
       ExternalMessageGateway: (input: { props: { source: string } }) => {
@@ -205,9 +327,20 @@ describe("Cybernest Manager runtime", () => {
     const responseTarget = new NativeRpcStub<ChatGatewayRpcTarget>({
       onGadgetResponse: async () => {},
     });
+    const externalEmail = "external@example.test";
+    const externalWorkspace = exports.OverseerDurableObject.getByName(
+      "private-test:external-gadget",
+    );
+    const existingStateBefore = await runInDurableObject(overseerStub, async (instance) => {
+      const storage = (instance as unknown as WorkspaceStorageFixture).impl.storage;
+      return {
+        chats: [...storage.chatMeta.list()].length,
+        externalChats: [...storage.externalChats.list()].length,
+      };
+    });
     try {
       await expect(externalGateway.submitExternalMessage({
-        callerEmail: "external@example.test",
+        callerEmail: externalEmail,
         gadgetKey: "external-gadget",
         chatKey: "external-chat",
         messageKey: "external-message",
@@ -215,23 +348,41 @@ describe("Cybernest Manager runtime", () => {
         prompt: "hello",
         chatGatewayRpcTarget: responseTarget,
       })).resolves.toMatchObject({accepted: false});
+
+      await expect(overseerStub.receiveExternalMessage({
+        callerEmail: externalEmail,
+        externalChatKey: "private-test:existing-chat",
+        idempotencyKey: "private-test:existing-message",
+        prompt: "hello existing workspace",
+        chatGatewayRpcTarget: responseTarget,
+        title: "External",
+      })).resolves.toMatchObject({accepted: false});
+
+      await expect(
+        exports.UserDurableObject
+          .get(exports.UserDurableObject.idFromName(externalEmail))
+          .whoamiIfExists(),
+      ).resolves.toBeNull();
+
+      await expect(runInDurableObject(externalWorkspace, async (instance) => {
+        const storage = (instance as unknown as WorkspaceStorageFixture).impl.storage;
+        return {
+          ownerId: storage.ownerId.get(),
+          chats: [...storage.chatMeta.list()].length,
+          externalChats: [...storage.externalChats.list()].length,
+        };
+      })).resolves.toEqual({ownerId: undefined, chats: 0, externalChats: 0});
+
+      await expect(runInDurableObject(overseerStub, async (instance) => {
+        const storage = (instance as unknown as WorkspaceStorageFixture).impl.storage;
+        return {
+          chats: [...storage.chatMeta.list()].length,
+          externalChats: [...storage.externalChats.list()].length,
+        };
+      })).resolves.toEqual(existingStateBefore);
     } finally {
       responseTarget[Symbol.dispose]();
     }
 
-    const notifyClosed = new NativeRpcStub<() => void>(() => {});
-    try {
-      await expect(
-        exports.OverseerDurableObject
-          .get(exports.OverseerDurableObject.idFromString(workspaceId!))
-          .open(
-            exports.UserDurableObject.idFromName(otherId).toString(),
-            otherId,
-            notifyClosed,
-          ),
-      ).rejects.toBeDefined();
-    } finally {
-      notifyClosed[Symbol.dispose]();
-    }
   });
 });
