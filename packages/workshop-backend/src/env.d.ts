@@ -50,6 +50,9 @@ declare global {
       // Browser Run binding used to render Gadget exports. Optional for self-hosted deployments.
       BROWSER?: BrowserRun;
 
+      // Existing private Manager runtime switch used by owner-only Workspace behavior.
+      CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+
       // ---------------------------------------------------------------------------------------------
       // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier
       // limits / top-up). All OFF by default; existing password / Cloudflare Access deployments are

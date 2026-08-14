@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "miniflare": "5.20260801.0-alpha",
     "esbuild": "^0.28.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
