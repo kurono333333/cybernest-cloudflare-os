@@ -1,13 +1,51 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import { env, runInDurableObject } from "cloudflare:test";
+import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
+import type {
+  CybernestWorkspaceApi,
+  CybernestWorkspaceSession,
+} from "@gadgets/workshop-shared/cybernest-workspace-api";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it } from "vitest";
 
-type Session = {
-  api: RpcStub<AuthenticatedApi>;
-  socket: WebSocket;
+type Session<T extends RpcTarget = AuthenticatedApi> = {
+  api: RpcStub<T>;
+  socket?: WebSocket;
+};
+
+type RestrictedWorkspaceSessionProbe = CybernestWorkspaceSession & {
+  deleteSelf(): Promise<void>;
+  setTitle(title: string): Promise<void>;
+  updateCode(update: Uint8Array): Promise<void>;
+  setPinned(pinned: boolean): Promise<void>;
+  getUiBundle(chatId?: number): Promise<unknown>;
+  newGatekeeper(accountId: number, resourceUrl: string): Promise<unknown>;
+  subscribeToPresence(...args: unknown[]): Promise<unknown>;
+  subscribeToWorkpieces(...args: unknown[]): Promise<unknown>;
+  getGatekeeperById(id: number): Promise<unknown>;
+  listHooks(): Promise<unknown>;
+  listCollaborators(): Promise<unknown>;
+  approveAction(id: number): Promise<void>;
+};
+
+type RestrictedWorkspaceApiProbe = Omit<
+  CybernestWorkspaceApi,
+  "createWorkspace" | "openWorkspace"
+> & {
+  createWorkspace(): Promise<RpcStub<RestrictedWorkspaceSessionProbe>>;
+  openWorkspace(id: string): Promise<RpcStub<RestrictedWorkspaceSessionProbe>>;
+  listOutputs(): Promise<unknown>;
+  listModels(): Promise<unknown>;
+  whoami(): Promise<unknown>;
+  addModel(...args: unknown[]): Promise<unknown>;
+  listGadgets(): Promise<unknown>;
+  openGadget(id: string): Promise<unknown>;
+  listGatekeeperVendors(...args: unknown[]): Promise<unknown>;
+  connectAccount(...args: unknown[]): Promise<unknown>;
+  listCloudflareAccounts(): Promise<unknown>;
+  subscribeConnectedAccounts(...args: unknown[]): Promise<unknown>;
+  getAdminApi(): Promise<unknown>;
 };
 
 type LegacySharingFixture = {
@@ -56,7 +94,8 @@ async function read(id: string): Promise<Response> {
   return managerRequest("/_cybernest/manager", "GET", id);
 }
 
-async function connect(id: string): Promise<Session> {
+async function connectRestricted<T extends RpcTarget = RestrictedWorkspaceApiProbe>(
+    id: string): Promise<Session<T>> {
   const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
     headers: {
       Upgrade: "websocket",
@@ -71,13 +110,38 @@ async function connect(id: string): Promise<Session> {
   socket.accept();
   return {
     socket,
-    api: newWebSocketRpcSession<AuthenticatedApi>(socket),
+    api: newWebSocketRpcSession<T>(socket),
   };
 }
 
-function close(session: Session): void {
+async function connectNative(id: string): Promise<Session> {
+  const native = (env as unknown as {
+    MANAGER_NATIVE_REGRESSION: {
+      fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+    };
+  }).MANAGER_NATIVE_REGRESSION;
+  const response = await native.fetch("https://workshop.invalid/api", {
+    headers: {
+      Upgrade: "websocket",
+      ...managerHeaders(id),
+    },
+  });
+  expect(response.status).toBe(101);
+  const socket = response.webSocket;
+  if (!socket) throw new TypeError("Expected a WebSocket response.");
+  socket.accept();
+  return {socket, api: newWebSocketRpcSession<AuthenticatedApi>(socket)};
+}
+
+function close<T extends RpcTarget>(session: Session<T>): void {
   session.api[Symbol.dispose]();
-  session.socket.close();
+  session.socket?.close();
+}
+
+async function expectValidatorRejection(call: Promise<unknown>): Promise<void> {
+  await expect(call).rejects.toThrow(
+      /^(?:capnweb-validate: refused |'[^']+' is not a function\.$)/u,
+  );
 }
 
 async function waitForGadget(
@@ -92,6 +156,198 @@ async function waitForGadget(
 }
 
 describe("Cybernest Manager runtime", () => {
+  it("exposes only the restricted root and rejects native root methods", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    try {
+      await expect(session.api.listWorkspaces()).resolves.toEqual([]);
+      await expect(session.api.listOutputs()).resolves.toMatchObject({
+        outputs: expect.any(Array),
+        catchingUp: expect.any(Boolean),
+      });
+      await expectValidatorRejection(session.api.whoami());
+      await expectValidatorRejection(session.api.addModel({}, {}));
+      await expectValidatorRejection(session.api.listModels());
+      await expectValidatorRejection(session.api.listGadgets());
+      await expectValidatorRejection(session.api.openGadget("missing"));
+      await expectValidatorRejection(session.api.listGatekeeperVendors());
+      await expectValidatorRejection(session.api.connectAccount("confluence"));
+      await expectValidatorRejection(session.api.listCloudflareAccounts());
+      await expectValidatorRejection(session.api.subscribeConnectedAccounts());
+      await expectValidatorRejection(session.api.getAdminApi());
+    } finally {
+      close(session);
+    }
+  });
+
+  it("returns a restricted nested session and rejects native workspace methods", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    let workspace: RpcStub<RestrictedWorkspaceSessionProbe> | undefined;
+    try {
+      workspace = await session.api.createWorkspace();
+      await expect(workspace.getMetadata()).resolves.toMatchObject({
+        id: expect.any(String),
+        title: expect.any(String),
+        pinned: expect.any(Boolean),
+      });
+      await expectValidatorRejection(workspace.deleteSelf());
+      await expectValidatorRejection(workspace.setTitle("not allowed"));
+      await expectValidatorRejection(workspace.updateCode(new Uint8Array()));
+      await expectValidatorRejection(workspace.setPinned(true));
+      await expectValidatorRejection(workspace.getUiBundle());
+      await expectValidatorRejection(workspace.newGatekeeper(1, "https://example.invalid"));
+      await expectValidatorRejection(workspace.subscribeToPresence());
+      await expectValidatorRejection(workspace.subscribeToWorkpieces());
+      await expectValidatorRejection(workspace.getGatekeeperById(1));
+      await expectValidatorRejection(workspace.listHooks());
+      await expectValidatorRejection(workspace.listCollaborators());
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(session);
+    }
+  });
+
+  it("keeps a newly created empty workspace in the restricted list across reconnect", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const first = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    let workspaceId: string | undefined;
+    try {
+      using workspace = await first.api.createWorkspace();
+      workspaceId = (await workspace.getMetadata()).id;
+
+      await expect(first.api.listWorkspaces()).resolves.toEqual([
+        expect.objectContaining({
+          id: workspaceId,
+          lifecycle: "unused",
+          lastActiveAt: null,
+        }),
+      ]);
+    } finally {
+      close(first);
+    }
+
+    const second = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    try {
+      await expect(second.api.listWorkspaces()).resolves.toEqual([
+        expect.objectContaining({
+          id: workspaceId,
+          lifecycle: "unused",
+          lastActiveAt: null,
+        }),
+      ]);
+      using reopened = await second.api.openWorkspace(workspaceId!);
+      await expect(reopened.getMetadata()).resolves.toMatchObject({id: workspaceId});
+    } finally {
+      close(second);
+    }
+  });
+
+  it("keeps an internal provisional registration out of the restricted list", async () => {
+    const id = managerId();
+    await ensure(id);
+    const user = exports.UserDurableObject.get(exports.UserDurableObject.idFromName(id));
+    const provisionalId = `provisional-${crypto.randomUUID()}`;
+
+    await runInDurableObject(user, async (instance) => {
+      await (instance as unknown as {
+        ensureGadgetRegistered(id: string, title: string): Promise<void>;
+      }).ensureGadgetRegistered(provisionalId, "Internal provisional");
+    });
+
+    const session = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    try {
+      await expect(session.api.listWorkspaces()).resolves.not.toEqual(
+        expect.arrayContaining([expect.objectContaining({id: provisionalId})]),
+      );
+    } finally {
+      close(session);
+    }
+  });
+
+  it("rejects the 101st owned workspace and keeps the list bounded", async () => {
+    const id = managerId();
+    await ensure(id);
+    const user = exports.UserDurableObject.get(exports.UserDurableObject.idFromName(id));
+
+    await runInDurableObject(user, async (instance) => {
+      const owner = instance as unknown as {
+        newGadget(id: string, title: string): Promise<void>;
+        listGadgets(): Promise<unknown[]>;
+      };
+      for (let index = 0; index < 100; index += 1) {
+        await owner.newGadget(`workspace-${index}-${crypto.randomUUID()}`, `Workspace ${index}`);
+      }
+      await expect(owner.newGadget(`workspace-over-limit-${crypto.randomUUID()}`, "Over limit"))
+        .rejects.toThrow("Workspace limit reached");
+      await expect(owner.listGadgets()).resolves.toHaveLength(100);
+    });
+  });
+
+  it("blocks approving an absent action at the restricted server boundary", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectRestricted<RestrictedWorkspaceApiProbe>(id);
+    let workspace: RpcStub<RestrictedWorkspaceSessionProbe> | undefined;
+    try {
+      workspace = await session.api.createWorkspace();
+      await expect(workspace.approveAction(999999)).rejects.toMatchObject({
+        code: "cybernest.blocked_action",
+      });
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(session);
+    }
+  });
+
+  it("keeps restricted Manager state isolated and refetches it after reconnect", async () => {
+    const managerA = managerId();
+    const managerB = managerId();
+    await ensure(managerA);
+    await ensure(managerB);
+
+    const sessionA = await connectRestricted<RestrictedWorkspaceApiProbe>(managerA);
+    const sessionB = await connectRestricted<RestrictedWorkspaceApiProbe>(managerB);
+    let workspace: RpcStub<RestrictedWorkspaceSessionProbe> | undefined;
+    let workspaceId: string | undefined;
+    try {
+      workspace = await sessionA.api.createWorkspace();
+      workspaceId = (await workspace.getMetadata()).id;
+      const openedByA = await sessionA.api.openWorkspace(workspaceId);
+      try {
+        await expect(openedByA.getMetadata()).resolves.toMatchObject({id: workspaceId});
+      } finally {
+        openedByA[Symbol.dispose]();
+      }
+      await expect(sessionB.api.listWorkspaces()).resolves.not.toContainEqual(
+          expect.objectContaining({id: workspaceId}),
+      );
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(sessionA);
+      close(sessionB);
+    }
+
+    const reconnected = await connectRestricted<RestrictedWorkspaceApiProbe>(managerA);
+    try {
+      const reopened = await reconnected.api.openWorkspace(workspaceId!);
+      try {
+        await expect(reopened.getMetadata()).resolves.toMatchObject({id: workspaceId});
+      } finally {
+        reopened[Symbol.dispose]();
+      }
+    } finally {
+      close(reconnected);
+    }
+  });
+
   it("ensures one manager profile, isolates A/B state, and reconnects to A", async () => {
     const managerA = managerId();
     const managerB = managerId();
@@ -101,7 +357,7 @@ describe("Cybernest Manager runtime", () => {
     await ensure(managerA);
     expect((await read(managerA)).status).toBe(204);
 
-    const sessionA = await connect(managerA);
+    const sessionA = await connectNative(managerA);
     let gadgetId: string;
     try {
       await expect(sessionA.api.whoami()).resolves.toMatchObject({
@@ -126,7 +382,7 @@ describe("Cybernest Manager runtime", () => {
     }
 
     await ensure(managerB);
-    const sessionB = await connect(managerB);
+    const sessionB = await connectNative(managerB);
     try {
       await expect(sessionB.api.whoami()).resolves.toMatchObject({
         type: "user",
@@ -138,7 +394,7 @@ describe("Cybernest Manager runtime", () => {
       close(sessionB);
     }
 
-    const reconnectedA = await connect(managerA);
+    const reconnectedA = await connectNative(managerA);
     try {
       await expect(reconnectedA.api.whoami()).resolves.toMatchObject({id: managerA});
       await expect(waitForGadget(reconnectedA.api, gadgetId!)).resolves.toMatchObject({
@@ -186,7 +442,7 @@ describe("Cybernest Manager runtime", () => {
     await ensure(otherId);
     await ensure(shareRecipientId);
 
-    const ownerSession = await connect(ownerId);
+    const ownerSession = await connectNative(ownerId);
     let workspaceId: string | undefined;
     try {
       using workspace = await ownerSession.api.newGadget();

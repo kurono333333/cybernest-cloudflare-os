@@ -28,6 +28,7 @@ import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
+import { CybernestWorkspaceApiImpl } from "./cybernest-workspace-api";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -79,6 +80,30 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
     const user = this.ctx.exports.UserDurableObject.get(userId);
     await user.ensureCybernestManager(managerId);
     await user.ensureKnowledgeAccount(capability);
+  }
+}
+
+/**
+ * Test-only native regression entrypoint. It is intentionally not mounted as an HTTP route and is
+ * only bound by the Core manager-runtime integration harness. The product Manager WebSocket above
+ * always exposes CybernestWorkspaceApi instead.
+ */
+@validateRpc()
+export class ManagerNativeRegressionEntrypoint extends WorkerEntrypoint<Env> {
+  async fetch(req: Request): Promise<Response> {
+    if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response(null, {status: 400});
+    }
+
+    const managerId = req.headers.get(CYBERNEST_MANAGER_HEADER);
+    if (managerId === null || !CYBERNEST_MANAGER_UUID.test(managerId)) {
+      return new Response(null, {status: 400});
+    }
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const nativeApi = new AuthenticatedApiImpl(this.ctx, this.env, user, () => {});
+    return newWorkersRpcResponse(req, nativeApi);
   }
 }
 
@@ -479,7 +504,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
-    await this.user.newGadget(id, kvRecord.metadata.title);
+    await this.user.newProvisionalGadget(id, kvRecord.metadata.title);
     let overseerResult = await this.#openGadgetInternal(id);
 
     // 4. Initialize from blueprint code.
@@ -733,8 +758,8 @@ async function handleCybernestPrivateApi(
     resp?.webSocket?.close();
   };
 
-  resp = await newWorkersRpcResponse(
-      req, new AuthenticatedApiImpl(ctx, env, manager.user, abortSession));
+  const nativeApi = new AuthenticatedApiImpl(ctx, env, manager.user, abortSession);
+  resp = await newWorkersRpcResponse(req, new CybernestWorkspaceApiImpl(nativeApi));
   if (aborted) resp?.webSocket?.close();
   return resp;
 }

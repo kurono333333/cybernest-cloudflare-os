@@ -1064,6 +1064,9 @@ export type GadgetMetadata = {
 export type GadgetMetadataWithTimestamps = GadgetMetadata & {
   created: Date;
   lastActive: Date;
+  // Cybernest marks an explicitly created but not yet active workspace as unused. The field is
+  // optional here so older native records remain readable by the standard API.
+  lifecycle?: "unused" | "active";
 }
 
 // The icons an output format may be drawn with. A closed set because we want them to look consistent.

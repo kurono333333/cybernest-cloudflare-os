@@ -1,12 +1,6 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  // Set to "true" to mount the standard UI behind Cybernest's same-origin Core gateway.
-  readonly VITE_CYBERNEST_MODE?: string;
-
-  // Non-secret deployment name used by Cybernest's local ServerConfig bootstrap.
-  readonly VITE_SITE_NAME?: string;
-
   // Override the local backend host used by Vite dev, e.g. "localhost:9000".
   readonly VITE_BACKEND_HOST?: string;
 
