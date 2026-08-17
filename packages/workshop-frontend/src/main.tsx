@@ -1,10 +1,9 @@
-import { StrictMode, useEffect, useRef, useState } from 'react'
+import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
-import { newWebSocketRpcSession } from 'capnweb'
-import type { RpcStub } from 'capnweb'
-import type { AuthenticatedApi, PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
-import { RpcContext, type RpcContextValue } from './RpcContext'
+import { RpcStub, newWebSocketRpcSession } from 'capnweb'
+import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
+import { RpcContext } from './RpcContext'
 import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
@@ -14,276 +13,168 @@ import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
-import {
-  buildCybernestServerConfig,
-  connectCybernest,
-  retryCybernestConnection,
-} from './cybernest'
-
-const CYBERNEST_MODE = import.meta.env.VITE_CYBERNEST_MODE === 'true'
-const CYBERNEST_SITE_NAME = import.meta.env.VITE_SITE_NAME?.trim() || 'dennoba'
 
 // ---------------------------------------------------------------------------
-// Dev auto-login: standard OS mode only. Cybernest mode receives an already
-// authenticated native AuthenticatedApi from Core and never reads OS tokens.
+// Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
+// with the dev account before React renders, so you never see the login page.
 // ---------------------------------------------------------------------------
 async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
   if (import.meta.env.VITE_DEV_AUTO_LOGIN !== 'true') return
-  if (localStorage.getItem('authToken')) return
+  if (localStorage.getItem('authToken')) return  // already logged in
 
   const username = import.meta.env.VITE_DEV_USERNAME ?? 'dev'
   const password = import.meta.env.VITE_DEV_PASSWORD ?? 'devpassword'
+
+  // Derive the passwordHash the same way the app does (argon2id via hashPassword),
+  // but here we use the same SERVICE_SALT + SHA-256 shortcut that wrangler dev accepts
+  // in local mode. We import hashPassword from the existing util.
   const { hashPassword } = await import('./passwordHash')
   const passwordHash = await hashPassword(username, password)
 
+  // Try createAccount first — works on a fresh backend. Returns null if already exists.
   let token = await stub.createAccount(username, username, passwordHash)
-  if (!token) token = await stub.login(username, passwordHash)
 
-  if (token) localStorage.setItem('authToken', token)
+  // If null, account already exists — just log in.
+  if (!token) {
+    token = await stub.login(username, passwordHash)
+  }
+
+  if (token) {
+    localStorage.setItem('authToken', token)
+  }
 }
 
-type RpcConnection =
-  | { readonly kind: 'public'; readonly stub: RpcStub<PublicApi> }
-  | { readonly kind: 'authenticated'; readonly stub: RpcStub<AuthenticatedApi> }
-
-type ReadyRuntime = {
-  readonly rpc: RpcContextValue
-  readonly router: ReturnType<typeof createRouter>
-}
-
-// WebSocket connection management stays outside React so StrictMode does not
-// create competing sessions during its development-only effect replay.
-let lastConnectTime = 0
-let backoff = 1000
-let currentConnection: RpcConnection | null = null
-let isConnectionLost = false
-const notifyCurrentConnectionUpdated: Set<() => void> = new Set()
+// WebSocket RPC connection management.
+//
+// React's useEffect / useState machinery is kind of obnoxious in that, in dev mode, it runs
+// everything twice (runs once, immediately cleans up, then runs again). This isn't so good for
+// our WebSocket as it means we are creating redundant connections to the server and throwing
+// them away instantly. It gets even worse when we start trying to handle disconnects gracefully:
+// we can end up with two connections that are fighting to replace each other.
+//
+// Or maybe I (Kenton) was just holding it wrong, idk.
+//
+// Anyway, I pulled the connection management out into these globals instead.
+let lastConnectTime: number = 0;
+let backoff: number = 1000;
 
 function getBackendHost(): string {
-  const backendHost = import.meta.env.VITE_BACKEND_HOST?.trim()
-  if (backendHost) return backendHost
-  return window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host
+  const backendHost = import.meta.env.VITE_BACKEND_HOST?.trim();
+  if (backendHost) return backendHost;
+
+  // When opening the Vite dev server directly (localhost:3000), the backend is at localhost:8787.
+  // Otherwise, the API is on the same host as the frontend.
+  return window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host;
 }
 
-function startPublicConnection(): RpcStub<PublicApi> {
-  lastConnectTime = Date.now()
-  const apiHost = getBackendHost()
-  const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api'
-  return newWebSocketRpcSession<PublicApi>(wsUrl)
+function startConnection(): RpcStub<PublicApi> {
+  lastConnectTime = Date.now();
+  const apiHost = getBackendHost();
+  const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
+  return newWebSocketRpcSession<PublicApi>(wsUrl);
 }
 
-async function startCybernestConnection() {
-  return connectCybernest({
-    location: window.location,
-    createSession: (url) => newWebSocketRpcSession<AuthenticatedApi>(url),
-  })
-}
+async function handleBroken(error: any) {
+  console.warn('RPC connection lost:', error);
 
-function contextValue(connection: RpcConnection): RpcContextValue {
-  return {
-    ...connection,
-    connectionLost: isConnectionLost,
-    markConnectionRestored,
-  }
-}
+  isConnectionLost = true;
+  for (let cb of notifyCurrentStubUpdated) { cb(); }
 
-async function handleBroken(error: unknown): Promise<void> {
-  console.warn('RPC connection lost:', error)
-
-  isConnectionLost = true
-  for (const callback of notifyCurrentConnectionUpdated) callback()
-
-  const timeSinceConnect = Date.now() - lastConnectTime
+  let timeSinceConnect = Date.now() - lastConnectTime;
   if (timeSinceConnect < backoff) {
-    const waitTime = backoff - timeSinceConnect
+    let waitTime = backoff - timeSinceConnect;
     console.warn(`Will try again in ${Math.round(waitTime / 1000)} seconds...`)
-    await new Promise((resolve) => setTimeout(resolve, waitTime))
-    console.warn('Retrying connection...')
-    backoff = Math.min(backoff * 2, 10000)
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+    console.warn(`Retrying connection...`);
+    backoff = Math.min(backoff * 2, 10000);
   } else {
-    backoff = 1000
+    backoff = 1000;
   }
 
-  if (CYBERNEST_MODE) {
-    const result = await retryCybernestConnection(
-      startCybernestConnection,
-      async () => {
-        const waitTime = backoff
-        console.warn(`Will try again in ${Math.round(waitTime / 1000)} seconds...`)
-        await new Promise((resolve) => setTimeout(resolve, waitTime))
-        console.warn('Retrying connection...')
-        backoff = Math.min(waitTime * 2, 10000)
-      },
-    )
-    if (result.kind === 'return_to_identity') {
-      window.location.assign('/')
-      return
-    }
+  currentStub = startConnection();
+  currentStub.onRpcBroken(handleBroken);
 
-    lastConnectTime = Date.now()
-    currentConnection = { kind: 'authenticated', stub: result.session }
-    currentConnection.stub.onRpcBroken(handleBroken)
-  } else {
-    currentConnection = { kind: 'public', stub: startPublicConnection() }
-    currentConnection.stub.onRpcBroken(handleBroken)
+  // Don't clear isConnectionLost here — the new connection hasn't proven
+  // it works yet. It gets cleared by markConnectionRestored() once the
+  // app successfully communicates with the backend.
+  for (let cb of notifyCurrentStubUpdated) {
+    cb();
   }
-
-  for (const callback of notifyCurrentConnectionUpdated) callback()
 }
 
-function markConnectionRestored(): void {
-  if (!isConnectionLost) return
-  isConnectionLost = false
-  for (const callback of notifyCurrentConnectionUpdated) callback()
+// Callbacks to call whenever `currentStub` or connection state is updated.
+let notifyCurrentStubUpdated: Set<() => void> = new Set();
+let isConnectionLost = false;
+
+// Called externally (e.g., by auth) to indicate the connection is alive.
+export function markConnectionRestored() {
+  if (!isConnectionLost) return;
+  isConnectionLost = false;
+  for (let cb of notifyCurrentStubUpdated) { cb(); }
 }
 
-if (!CYBERNEST_MODE) {
-  installWorkshopErrorReporting()
-  currentConnection = { kind: 'public', stub: startPublicConnection() }
-  currentConnection.stub.onRpcBroken(handleBroken)
-}
+// Current stub. handleBroken() will replace this on disconnect.
+installWorkshopErrorReporting()
+let currentStub = startConnection();
+currentStub.onRpcBroken(handleBroken);
 
-function CybernestBootScreen({
-  retryable,
-  onRetry,
-}: {
-  readonly retryable: boolean
-  readonly onRetry: () => void
-}) {
-  return (
-    <main className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
-      {retryable ? (
-        <>
-          <p className="text-sm text-kumo-danger">Workspaceを準備できませんでした。</p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
-          >
-            再試行
-          </button>
-        </>
-      ) : (
-        <>
-          <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm text-kumo-subtle">Workspaceを準備しています。</p>
-        </>
-      )}
-    </main>
-  )
-}
+const router = createRouter()
+applyStoredThemeMode()
 
 function AppWithConnection() {
-  const [runtime, setRuntime] = useState<ReadyRuntime | null>(() => {
-    if (CYBERNEST_MODE || !currentConnection) return null
-    return {
-      rpc: contextValue(currentConnection),
-      router: createRouter({ cybernestMode: false }),
-    }
-  })
-  const [bootRetryable, setBootRetryable] = useState(false)
-  const bootStarted = useRef(false)
-  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null)
-  const [serverConfigError, setServerConfigError] = useState(false)
-
-  const publishCurrentConnection = () => {
-    if (!currentConnection) return
-    setRuntime((previous) => ({
-      rpc: contextValue(currentConnection!),
-      router: previous?.router ?? createRouter({ cybernestMode: CYBERNEST_MODE }),
-    }))
-  }
-
-  const bootCybernest = async () => {
-    setBootRetryable(false)
-    const result = await startCybernestConnection()
-    if (result.kind === 'return_to_identity') {
-      window.location.assign('/')
-      return
-    }
-    if (result.kind === 'retryable') {
-      setBootRetryable(true)
-      return
-    }
-
-    lastConnectTime = Date.now()
-    currentConnection = { kind: 'authenticated', stub: result.session }
-    currentConnection.stub.onRpcBroken(handleBroken)
-    setServerConfig(buildCybernestServerConfig(CYBERNEST_SITE_NAME))
-    setRuntime({
-      rpc: contextValue(currentConnection),
-      router: createRouter({ cybernestMode: true }),
-    })
-  }
+  const [rpcState, setRpcState] = useState<{stub: RpcStub<PublicApi>; connectionLost: boolean}>({
+    stub: currentStub,
+    connectionLost: isConnectionLost,
+  });
+  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [serverConfigError, setServerConfigError] = useState(false);
 
   useEffect(() => {
-    const callback = () => publishCurrentConnection()
-    notifyCurrentConnectionUpdated.add(callback)
+    let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
+    notifyCurrentStubUpdated.add(cb);
+    return () => { notifyCurrentStubUpdated.delete(cb); };
+  }, []);
 
-    if (CYBERNEST_MODE && !bootStarted.current) {
-      bootStarted.current = true
-      void bootCybernest()
-    }
-
-    return () => {
-      notifyCurrentConnectionUpdated.delete(callback)
-    }
-  }, [])
-
+  // Fetch deployment config once the (re)connected stub is available. Re-fetch on reconnect so a
+  // server restart with changed config is picked up.
   useEffect(() => {
-    if (!runtime || runtime.rpc.kind !== 'public') return
-    let cancelled = false
-    setServerConfigError(false)
-    runtime.rpc.stub.getServerConfig()
-      .then((config) => {
+    let cancelled = false;
+    setServerConfigError(false);
+    rpcState.stub.getServerConfig()
+      .then((cfg) => {
         if (!cancelled) {
-          setServerConfig(config.siteLogo ? {
-            ...config,
-            siteLogo: { url: cacheBustSiteLogoUrl(config.siteLogo.url) },
-          } : config)
+          setServerConfig(cfg.siteLogo ? {
+            ...cfg,
+            siteLogo: { url: cacheBustSiteLogoUrl(cfg.siteLogo.url) },
+          } : cfg);
         }
       })
-      .catch(() => {
-        if (!cancelled) setServerConfigError(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [runtime?.rpc.stub])
+      .catch(() => { if (!cancelled) setServerConfigError(true); });
+    return () => { cancelled = true; };
+  }, [rpcState.stub]);
+
+  // Apply the deployment's admin-chosen accent color (overrides brand CSS vars at runtime).
+  useEffect(() => {
+    applyAccentColor(serverConfig?.accentColor ?? '');
+  }, [serverConfig?.accentColor]);
 
   useEffect(() => {
-    applyAccentColor(serverConfig?.accentColor ?? '')
-  }, [serverConfig?.accentColor])
-
-  useEffect(() => {
-    if (CYBERNEST_MODE) return
-    return applySiteFavicon(serverConfig?.siteLogo?.url)
-  }, [serverConfig])
-
-  if (!runtime) {
-    return (
-      <CybernestBootScreen
-        retryable={bootRetryable}
-        onRetry={() => void bootCybernest()}
-      />
-    )
-  }
+    return applySiteFavicon(serverConfig?.siteLogo?.url);
+  }, [serverConfig]);
 
   return (
     <ThemeProvider>
-      <RpcContext.Provider value={runtime.rpc}>
+      <RpcContext.Provider value={rpcState}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
           <ServerConfigContext.Provider value={serverConfig}>
             <AnnouncementBanner />
-            <RouterProvider router={runtime.router} />
+            <RouterProvider router={router} />
           </ServerConfigContext.Provider>
         </ServerConfigErrorContext.Provider>
       </RpcContext.Provider>
     </ThemeProvider>
-  )
+  );
 }
-
-applyStoredThemeMode()
 
 const root = createRoot(document.getElementById('root')!, {
   onUncaughtError: (error) => reportIssue('workshop.react-root', error, {
@@ -291,15 +182,16 @@ const root = createRoot(document.getElementById('root')!, {
   }),
 })
 
-const initialPublicConnection = currentConnection
-if (initialPublicConnection?.kind === 'public') {
-  void devAutoLogin(initialPublicConnection.stub).catch(() => {})
-}
+// Kick off dev auto-login in the background. If it completes before
+// useAuth checks the token, the user skips the login page. If the backend
+// is unreachable, the app still renders immediately (showing a connection
+// banner or login page) instead of hanging on a blank screen.
+devAutoLogin(currentStub).catch(() => {})
 
 root.render(
   <StrictMode>
     <FrontendErrorBoundary>
       <AppWithConnection />
     </FrontendErrorBoundary>
-  </StrictMode>,
+  </StrictMode>
 )

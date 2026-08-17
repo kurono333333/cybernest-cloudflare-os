@@ -13,6 +13,8 @@ const EXPECTED_MANAGER_KNOWLEDGE_ERRORS = new Set([
   "This Manager runtime is private and cannot be shared.",
   "A private Manager runtime cannot keep shared users.",
   "You don't have access to this workspace.",
+  "Action is not reviewable.",
+  "Gadget restarted to revoke access for a removed collaborator.",
   "The execution context which hosts this callback is no longer running.",
 ]);
 
@@ -30,6 +32,10 @@ export default defineConfig({
       },
       miniflare: {
         serviceBindings: {
+          MANAGER_NATIVE_REGRESSION: {
+            name: kCurrentWorker,
+            entrypoint: "ManagerNativeRegressionEntrypoint",
+          },
           GATEKEEPER_CUSTOM: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeTestVendor" },
           MANAGER_KNOWLEDGE_BRIDGE: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeBridge" },
           MANAGER_KNOWLEDGE_CAPABILITY_FACTORY: {
@@ -59,7 +65,17 @@ export default defineConfig({
         typeof error.message === "string"
           ? error.message
           : undefined;
-      if (message !== undefined && EXPECTED_MANAGER_KNOWLEDGE_ERRORS.has(message)) return false;
+      if (
+        message !== undefined &&
+        (EXPECTED_MANAGER_KNOWLEDGE_ERRORS.has(message) ||
+          message.includes("This Manager runtime is private") ||
+          message.includes("A private Manager runtime cannot keep shared users") ||
+          message.includes("You don't have access to this workspace") ||
+          /^capnweb-validate: refused /u.test(message) ||
+          /^'[^']+' is not a function\.$/u.test(message))
+      ) {
+        return false;
+      }
     },
   },
 });

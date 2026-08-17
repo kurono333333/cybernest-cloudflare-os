@@ -8,9 +8,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd())
   const backendHost = env.VITE_BACKEND_HOST?.trim() || 'localhost:8787'
   const frontendErrorReporting = env.VITE_FRONTEND_ERROR_REPORTING === 'true'
-  const cybernestMode = env.VITE_CYBERNEST_MODE === 'true'
   return {
-    base: cybernestMode ? '/workspace/' : '/',
     plugins: [
       TanStackRouterVite({ target: 'react', autoCodeSplitting: true }),
       react(),

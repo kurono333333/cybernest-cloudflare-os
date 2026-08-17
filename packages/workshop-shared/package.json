@@ -9,6 +9,10 @@
       "types": "./src/api.ts",
       "import": "./src/api.ts"
     },
+    "./cybernest-workspace-api": {
+      "types": "./src/cybernest-workspace-api.ts",
+      "import": "./src/cybernest-workspace-api.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

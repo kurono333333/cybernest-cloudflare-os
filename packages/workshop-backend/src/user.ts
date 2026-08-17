@@ -22,6 +22,10 @@ const CYBERNEST_MANAGER_UUID =
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
 const OUTPUTS_BACKFILL_PAGE = 16;
 
+// Keep user-owned workspace creation and list work bounded for the serverless runtime. There is no
+// pagination UI in Cybernest 06, so the same limit bounds both creation and one list response.
+export const MAX_WORKSPACES_PER_USER = 100;
+
 type ConnectedAccountRecord = {
   id: number;
   account: Fetcher<GatekeeperUser>;
@@ -146,6 +150,7 @@ type LibraryBlueprintRecord = {
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
+  lifecycle?: "unused" | "active";
   // If we're not the gadget owner (it was shared with us), `owner` is set (inherited from
   // GadgetMetadata).
 };
@@ -407,16 +412,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return null;
     }
 
-    // Do a little migration here for old data.
+    // Do a little migration here for old data. Records without lastActive remain provisional;
+    // promoting them here would expose internal chat/agent records in the user list.
     // TODO(soon): Delete this.
     for (let gadget of Array.from(this.storage.gadgets.list())) {
-      if (!gadget.created || !gadget.lastActive) {
-        if (!gadget.created) {
-          gadget.created = new Date("2026-01-01");
-        }
-        if (!gadget.lastActive) {
-          gadget.lastActive = new Date("2026-01-01");;
-        }
+      let changed = false;
+      if (!gadget.created) {
+        gadget.created = new Date("2026-01-01");
+        changed = true;
+      }
+      if (gadget.lastActive && gadget.lifecycle === undefined) {
+        gadget.lifecycle = "active";
+        changed = true;
+      }
+      if (changed) {
         this.storage.gadgets.put(gadget);
       }
     }
@@ -665,6 +674,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (record) {
       // Already tracked -- update lastActive and cached fields.
       record.lastActive = now;
+      record.lifecycle = "active";
       record.title = title;
       record.owner = ownerProfile;
       record.role = role;
@@ -678,6 +688,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         role,
         created: now,
         lastActive: now,
+        lifecycle: "active",
       });
     }
   }
@@ -918,6 +929,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     for (let gadget of this.storage.gadgets.list()) {
       if (isFullyCreated(gadget)) {
         result.push(gadget);
+        if (result.length === MAX_WORKSPACES_PER_USER) break;
       }
     }
     return result;
@@ -946,19 +958,39 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async newGadget(id: string, title: string): Promise<void> {
+    const ownedCount = Array.from(this.storage.gadgets.list())
+      .filter(gadget => gadget.owner === undefined)
+      .length;
+    if (ownedCount >= MAX_WORKSPACES_PER_USER) {
+      throw new Error("Workspace limit reached.");
+    }
     let created = new Date();
-    this.storage.gadgets.put({id, title, created});
+    this.storage.gadgets.put({id, title, created, lastActive: created, lifecycle: "unused"});
+  }
+
+  // Internal agent/external-message registration must remain provisional until the existing
+  // activity path calls setGadgetLastActive(). It deliberately does not call newGadget(), whose
+  // semantics are the user-visible durable creation boundary.
+  async newProvisionalGadget(id: string, title: string): Promise<void> {
+    const ownedCount = Array.from(this.storage.gadgets.list())
+      .filter(gadget => gadget.owner === undefined)
+      .length;
+    if (ownedCount >= MAX_WORKSPACES_PER_USER) {
+      throw new Error("Workspace limit reached.");
+    }
+    this.storage.gadgets.put({id, title, created: new Date()});
   }
 
   async ensureGadgetRegistered(id: string, title: string): Promise<void> {
     if (this.storage.gadgets.get(id)) return;
-    await this.newGadget(id, title);
+    await this.newProvisionalGadget(id, title);
   }
 
   async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
     let gadget = this.storage.gadgets.get(id);
     if (gadget) {
       gadget.lastActive = time;
+      gadget.lifecycle = "active";
       if (totalCost) {
         gadget.totalCost = totalCost;
       }

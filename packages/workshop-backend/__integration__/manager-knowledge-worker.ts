@@ -12,6 +12,7 @@ export {
   GatekeeperConnectCallbackImpl,
   ExternalMessageGateway,
   ManagerKnowledgeBridge,
+  ManagerNativeRegressionEntrypoint,
   UserDurableObject,
 } from "../src/server.js";
 
