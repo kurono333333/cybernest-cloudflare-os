@@ -7,6 +7,7 @@ import type {
   AiChatSubscriber,
   ActionsSubscriber,
   AuthenticatedApi,
+  CybernestConversationCaptureOverseer,
   GadgetMetadataWithTimestamps,
   ListOutputsResult,
   Overseer,
@@ -14,11 +15,16 @@ import type {
 import type {
   CybernestActionSubscriber,
   CybernestChatSubscriber,
+  CybernestConversationDraft,
+  CybernestConversationSaveResult,
   CybernestWorkspaceMetadata,
 } from "@gadgets/workshop-shared/cybernest-workspace-api";
+import { createCybernestError } from "@gadgets/workshop-shared/cybernest-workspace-api";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ModelHandle } from "../src/ai-models";
 import { CybernestWorkspaceApiImpl } from "../src/cybernest-workspace-api";
+import { completeTextWithTimeout } from "../src/overseer";
 
 const timestamp = new Date("2026-08-16T00:00:00.000Z");
 
@@ -37,7 +43,8 @@ const workspaceMetadata = (
 const emptyActions = (): ActionLogEntry[] => [];
 
 const makeOverseer = (
-    overrides: Partial<Overseer> = {}): Overseer => ({
+    overrides: Partial<Overseer & CybernestConversationCaptureOverseer> = {}):
+    Overseer & CybernestConversationCaptureOverseer => ({
   getMetadata: vi.fn().mockResolvedValue({id: "workspace-1", title: "Workspace title", pinned: true}),
   subscribeToMetadata: vi.fn(),
   listModels: vi.fn().mockResolvedValue([{type: "agent", id: "model-1", name: "Model 1"}]),
@@ -52,8 +59,20 @@ const makeOverseer = (
   subscribeToActions: vi.fn(),
   approveAction: vi.fn().mockResolvedValue(undefined),
   rejectAction: vi.fn().mockResolvedValue(undefined),
+  organizeChat: vi.fn().mockResolvedValue({
+    revisionId: "44444444-4444-4444-8444-444444444444",
+    documentKey: "conversation-context",
+    baseSourceRevisionId: null,
+    contentHash: "a".repeat(64),
+    content: "# Conversation\n",
+  } satisfies CybernestConversationDraft),
+  saveConversation: vi.fn().mockResolvedValue({
+    revisionId: "44444444-4444-4444-8444-444444444444",
+    documentKey: "conversation-context",
+    contentHash: "a".repeat(64),
+  } satisfies CybernestConversationSaveResult),
   ...overrides,
-} as unknown as Overseer);
+} as unknown as Overseer & CybernestConversationCaptureOverseer);
 
 const makeApi = (
     overrides: Partial<AuthenticatedApi> = {}): AuthenticatedApi => ({
@@ -67,6 +86,49 @@ const makeApi = (
 const openSession = async (
     api: AuthenticatedApi = makeApi()): Promise<Awaited<ReturnType<CybernestWorkspaceApiImpl["createWorkspace"]>>> =>
   new CybernestWorkspaceApiImpl(api).createWorkspace();
+
+describe("conversation organization completion", () => {
+  it("aborts an in-flight provider stream at the timeout and clears the timer", async () => {
+    vi.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    let rejectResult: (reason?: unknown) => void = () => {};
+    let pendingResult = new Promise<never>((_resolve, reject) => {
+      rejectResult = reject;
+    });
+    let handle = {
+      model: {},
+      stream: vi.fn((
+          _model: unknown,
+          _context: unknown,
+          options?: {signal?: AbortSignal},
+      ) => {
+        observedSignal = options?.signal;
+        options?.signal?.addEventListener(
+            "abort", () => rejectResult(options.signal?.reason), {once: true});
+        return {result: () => pendingResult};
+      }),
+    } as unknown as ModelHandle;
+
+    try {
+      let result = completeTextWithTimeout(handle, {
+        prompt: "untrusted conversation snapshot",
+        maxTokens: 4,
+      }, 30_000);
+      let rejection = expect(result).rejects.toBeDefined();
+      expect(handle.stream).toHaveBeenCalledOnce();
+      expect(observedSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(observedSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await rejection;
+      expect(observedSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("CybernestWorkspaceApiImpl", () => {
   it("projects workspace and output metadata into safe DTOs", async () => {
@@ -505,6 +567,174 @@ describe("CybernestWorkspaceApiImpl", () => {
       code: "cybernest.invalid_model",
     });
     expect(newChat).not.toHaveBeenCalled();
+  });
+
+  it("delegates exact conversation drafts and save results without rewriting them", async () => {
+    const draft: CybernestConversationDraft = {
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: "55555555-5555-4555-8555-555555555555",
+      contentHash: "b".repeat(64),
+      content: "# Exact\n\n  keep whitespace  \n",
+    };
+    const saved: CybernestConversationSaveResult = {
+      revisionId: draft.revisionId,
+      documentKey: draft.documentKey,
+      contentHash: draft.contentHash,
+    };
+    const organizeChat = vi.fn().mockResolvedValue(draft);
+    const saveConversation = vi.fn().mockResolvedValue(saved);
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({organizeChat, saveConversation})),
+    }));
+
+    await expect(session.organizeChat(5, "model-1")).resolves.toEqual(draft);
+    await expect(session.saveConversation(5, draft)).resolves.toEqual(saved);
+    expect(organizeChat).toHaveBeenCalledWith(5, "model-1");
+    expect(saveConversation).toHaveBeenCalledWith(5, draft);
+  });
+
+  it("rejects invalid capture input before reaching native authority", async () => {
+    const organizeChat = vi.fn().mockResolvedValue(undefined);
+    const saveConversation = vi.fn().mockResolvedValue(undefined);
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({organizeChat, saveConversation})),
+    }));
+    const validDraft: CybernestConversationDraft = {
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: null,
+      contentHash: "a".repeat(64),
+      content: "candidate",
+    };
+
+    await expect(session.organizeChat(-1, null)).rejects.toMatchObject({
+      code: "cybernest.invalid_mutation",
+    });
+    await expect(session.saveConversation(-1, validDraft)).rejects.toMatchObject({
+      code: "cybernest.invalid_mutation",
+    });
+    await expect(session.organizeChat(5, "missing-model")).rejects.toMatchObject({
+      code: "cybernest.invalid_model",
+    });
+    for (const draft of [
+      {...validDraft, documentKey: "wrong-key"},
+      {...validDraft, revisionId: "not-a-uuid"},
+      {...validDraft, baseSourceRevisionId: "not-a-uuid"},
+      {...validDraft, contentHash: "not-a-hash"},
+      {...validDraft, content: "bad\ud800"},
+    ]) {
+      await expect(session.saveConversation(5, draft)).rejects.toMatchObject({
+        code: "cybernest.invalid_mutation",
+      });
+    }
+    await expect(session.saveConversation(5, {
+      ...validDraft,
+      content: "x".repeat(1_048_577),
+    })).rejects.toMatchObject({
+      code: "cybernest.invalid_mutation",
+    });
+
+    expect(organizeChat).not.toHaveBeenCalled();
+    expect(saveConversation).not.toHaveBeenCalled();
+  });
+
+  it("maps capture failures without exposing native error details", async () => {
+    const organizeChat = vi.fn().mockRejectedValue(new Error("internal native detail"));
+    const saveConversation = vi.fn().mockRejectedValue(new Error("internal native detail"));
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({organizeChat, saveConversation})),
+    }));
+    const draft: CybernestConversationDraft = {
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: null,
+      contentHash: "a".repeat(64),
+      content: "candidate",
+    };
+
+    await expect(session.organizeChat(5, null)).rejects.toMatchObject({
+      code: "cybernest.os_unavailable",
+    });
+    await expect(session.organizeChat(5, null)).rejects.not.toThrow("internal native detail");
+    await expect(session.saveConversation(5, draft)).rejects.toMatchObject({
+      code: "cybernest.os_unavailable",
+    });
+    await expect(session.saveConversation(5, draft)).rejects.not.toThrow("internal native detail");
+  });
+
+  it("preserves only a known safe native capture error category", async () => {
+    const organizeChat = vi.fn().mockRejectedValue(
+      createCybernestError("cybernest.invalid_mutation", "internal native detail"),
+    );
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({organizeChat})),
+    }));
+
+    await expect(session.organizeChat(5, null)).rejects.toMatchObject({
+      code: "cybernest.invalid_mutation",
+    });
+    await expect(session.organizeChat(5, null)).rejects.not.toThrow("internal native detail");
+  });
+
+  it("fails closed when native capture results do not match the draft contract", async () => {
+    const organizeChat = vi.fn().mockResolvedValue({
+      revisionId: "not-a-uuid",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: null,
+      contentHash: "a".repeat(64),
+      content: "candidate",
+    });
+    const saveConversation = vi.fn().mockResolvedValue({
+      revisionId: "55555555-5555-4555-8555-555555555555",
+      documentKey: "conversation-context",
+      contentHash: "a".repeat(64),
+    });
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({organizeChat, saveConversation})),
+    }));
+    const draft: CybernestConversationDraft = {
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: null,
+      contentHash: "a".repeat(64),
+      content: "candidate",
+    };
+
+    await expect(session.organizeChat(5, null)).rejects.toMatchObject({
+      code: "cybernest.unknown_result",
+    });
+    await expect(session.saveConversation(5, draft)).rejects.toMatchObject({
+      code: "cybernest.unknown_result",
+    });
+  });
+
+  it("retries the same save request without creating a new draft", async () => {
+    const draft: CybernestConversationDraft = {
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      documentKey: "conversation-context",
+      baseSourceRevisionId: null,
+      contentHash: "a".repeat(64),
+      content: "candidate",
+    };
+    const saved: CybernestConversationSaveResult = {
+      revisionId: draft.revisionId,
+      documentKey: draft.documentKey,
+      contentHash: draft.contentHash,
+    };
+    const saveConversation = vi.fn()
+        .mockRejectedValueOnce(new Error("transport lost"))
+        .mockResolvedValueOnce(saved);
+    const session = await openSession(makeApi({
+      newGadget: vi.fn().mockResolvedValue(makeOverseer({saveConversation})),
+    }));
+
+    await expect(session.saveConversation(5, draft)).rejects.toMatchObject({
+      code: "cybernest.os_unavailable",
+    });
+    await expect(session.saveConversation(5, draft)).resolves.toEqual(saved);
+    expect(saveConversation).toHaveBeenNthCalledWith(1, 5, draft);
+    expect(saveConversation).toHaveBeenNthCalledWith(2, 5, draft);
   });
 
   it("blocks unknown action kinds without calling native approve", async () => {

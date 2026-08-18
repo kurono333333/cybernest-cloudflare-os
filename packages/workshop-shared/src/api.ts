@@ -26,6 +26,10 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type {
+  CybernestConversationDraft,
+  CybernestConversationSaveResult,
+} from "./cybernest-workspace-api.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -1317,11 +1321,24 @@ export type AgentSpawnerConfig = {
   env: Record<string, WorkpieceId>,
 };
 
+// Private owner-only conversation capture methods. Keeping this extension named separately makes
+// the owner-only surface explicit; Overseer includes it while the restricted Use wrapper denies it.
+export interface CybernestConversationCaptureOverseer extends RpcTarget {
+  organizeChat(
+    chatId: number,
+    modelId: string | null,
+  ): Promise<CybernestConversationDraft>;
+  saveConversation(
+    chatId: number,
+    draft: CybernestConversationDraft,
+  ): Promise<CybernestConversationSaveResult>;
+}
+
 // Interface to a workspace's Overseer, used to display the Gadget Workshop shell UI around that
 // workspace. Workspace-level concerns live here: the gadget registry, code sync (one Yjs doc for
 // the whole workspace), chats, actions/hooks, sharing, and blueprint listing. Per-gadget
 // operations live on the GadgetClient sub-capability (see createGadget()/getGadget()).
-export interface Overseer extends RpcTarget {
+export interface Overseer extends RpcTarget, CybernestConversationCaptureOverseer {
   // Get metadata describing this workspace.
   getMetadata(): Promise<GadgetMetadata>;
 

@@ -1,4 +1,5 @@
 import source from "../src/cybernest-workspace-api.ts?raw";
+import apiSource from "../src/api.ts?raw";
 import type { RpcStub, RpcTarget } from "capnweb";
 import { describe, expect, it } from "vitest";
 
@@ -7,21 +8,43 @@ import {
   type CybernestAction,
   type CybernestActionSubscriber,
   type CybernestChatSubscriber,
+  type CybernestConversationCaptureSession,
+  type CybernestConversationDraft,
+  type CybernestConversationSaveResult,
   type CybernestErrorCode,
-  type CybernestMetadataSubscriber,
   type CybernestWorkspaceApi,
   type CybernestWorkspaceSession,
 } from "@gadgets/workshop-shared/cybernest-workspace-api";
+import type {
+  CybernestConversationCaptureOverseer,
+  Overseer,
+} from "@gadgets/workshop-shared/api";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends
   (<Value>() => Value extends Right ? 1 : 2) ? true : false;
 type Assert<Value extends true> = Value;
 
+const interfaceBody = (sourceText: string, name: string): string => {
+  const match = sourceText.match(
+    new RegExp(`export interface ${name}(?: extends [^{]+)? \\{([\\s\\S]*?)\\n\\}`),
+  );
+  if (match === null) throw new Error(`Missing interface: ${name}`);
+  return match[1] ?? "";
+};
+
+const interfaceMethodNames = (body: string): string[] =>
+  [...body.matchAll(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/gmu)].map((match) => match[1] ?? "");
+
 type RootMethodNames = Extract<keyof CybernestWorkspaceApi, string>;
 type SessionMethodNames = Extract<keyof CybernestWorkspaceSession, string>;
+type ConversationCaptureSessionMethodNames = Extract<
+  keyof CybernestConversationCaptureSession,
+  string
+>;
 type ChatSubscriberMethodNames = Extract<keyof CybernestChatSubscriber, string>;
 type ActionSubscriberMethodNames = Extract<keyof CybernestActionSubscriber, string>;
+type ConversationCaptureMethodNames = Extract<keyof CybernestConversationCaptureOverseer, string>;
 type ErrorCodes = CybernestErrorCode;
 
 type RootSurfaceIsExact = Assert<Equal<
@@ -44,6 +67,8 @@ type SessionSurfaceIsExact = Assert<Equal<
   | "subscribeToActions"
   | "approveAction"
   | "rejectAction"
+  | "organizeChat"
+  | "saveConversation"
 >>;
 type ChatSubscriberSurfaceIsExact = Assert<Equal<
   ChatSubscriberMethodNames,
@@ -52,6 +77,64 @@ type ChatSubscriberSurfaceIsExact = Assert<Equal<
 type ActionSubscriberSurfaceIsExact = Assert<Equal<
   ActionSubscriberMethodNames,
   "entry" | "ready"
+>>;
+type ConversationCaptureSurfaceIsExact = Assert<Equal<
+  ConversationCaptureSessionMethodNames,
+  "organizeChat" | "saveConversation"
+>>;
+type ConversationCaptureOwnerSurfaceIsExact = Assert<Equal<
+  ConversationCaptureMethodNames,
+  "organizeChat" | "saveConversation"
+>>;
+type WorkspaceSessionIncludesConversationCapture = Assert<
+  CybernestWorkspaceSession extends CybernestConversationCaptureSession ? true : false
+>;
+type SessionOrganizeSignatureIsExact = Assert<Equal<
+  CybernestConversationCaptureSession["organizeChat"],
+  (chatId: number, modelId: string | null) => Promise<CybernestConversationDraft>
+>>;
+type SessionSaveSignatureIsExact = Assert<Equal<
+  CybernestConversationCaptureSession["saveConversation"],
+  (chatId: number, draft: CybernestConversationDraft) => Promise<CybernestConversationSaveResult>
+>>;
+type CaptureSessionIsRpcTarget = Assert<
+  CybernestConversationCaptureSession extends RpcTarget ? true : false
+>;
+type CaptureOwnerIsRpcTarget = Assert<
+  CybernestConversationCaptureOverseer extends RpcTarget ? true : false
+>;
+type ConversationDraftIsExact = Assert<Equal<
+  CybernestConversationDraft,
+  {
+    revisionId: string;
+    documentKey: string;
+    baseSourceRevisionId: string | null;
+    contentHash: string;
+    content: string;
+  }
+>>;
+type ConversationSaveResultIsExact = Assert<Equal<
+  CybernestConversationSaveResult,
+  {
+    revisionId: string;
+    documentKey: string;
+    contentHash: string;
+  }
+>>;
+type OrganizeSignatureIsExact = Assert<Equal<
+  CybernestConversationCaptureOverseer["organizeChat"],
+  (chatId: number, modelId: string | null) => Promise<CybernestConversationDraft>
+>>;
+type SaveSignatureIsExact = Assert<Equal<
+  CybernestConversationCaptureOverseer["saveConversation"],
+  (chatId: number, draft: CybernestConversationDraft) => Promise<CybernestConversationSaveResult>
+>>;
+type NativeOverseerIncludesConversationCapture = Assert<
+  Overseer extends CybernestConversationCaptureOverseer ? true : false
+>;
+type NativeOverseerCaptureSurfaceIsExact = Assert<Equal<
+  Extract<keyof Overseer & CybernestConversationCaptureOverseer, string>,
+  "organizeChat" | "saveConversation"
 >>;
 type ErrorCodeSurfaceIsExact = Assert<Equal<
   ErrorCodes,
@@ -69,9 +152,44 @@ void (undefined as RootSurfaceIsExact);
 void (undefined as SessionSurfaceIsExact);
 void (undefined as ChatSubscriberSurfaceIsExact);
 void (undefined as ActionSubscriberSurfaceIsExact);
+void (undefined as ConversationCaptureSurfaceIsExact);
+void (undefined as ConversationCaptureOwnerSurfaceIsExact);
+void (undefined as WorkspaceSessionIncludesConversationCapture);
+void (undefined as SessionOrganizeSignatureIsExact);
+void (undefined as SessionSaveSignatureIsExact);
+void (undefined as CaptureSessionIsRpcTarget);
+void (undefined as CaptureOwnerIsRpcTarget);
+void (undefined as ConversationDraftIsExact);
+void (undefined as ConversationSaveResultIsExact);
+void (undefined as OrganizeSignatureIsExact);
+void (undefined as SaveSignatureIsExact);
+void (undefined as NativeOverseerIncludesConversationCapture);
+void (undefined as NativeOverseerCaptureSurfaceIsExact);
 void (undefined as ErrorCodeSurfaceIsExact);
 
 describe("Cybernest Workspace shared contract", () => {
+  it("fixes the conversation capture shape without exposing native authority", () => {
+    const sessionBody = interfaceBody(source, "CybernestConversationCaptureSession");
+    const ownerBody = interfaceBody(apiSource, "CybernestConversationCaptureOverseer");
+
+    expect(interfaceMethodNames(sessionBody)).toEqual(["organizeChat", "saveConversation"]);
+    expect(source).toContain("export type CybernestConversationDraft = {");
+    expect(source).toContain("export type CybernestConversationSaveResult = {");
+    expect(interfaceMethodNames(ownerBody)).toEqual(["organizeChat", "saveConversation"]);
+    expect(ownerBody).not.toContain("managerId");
+    expect(ownerBody).not.toContain("KnowledgeBase");
+  });
+
+  it("integrates capture into the native owner contract and restricted session", () => {
+    expect(source).toMatch(
+        /export interface CybernestWorkspaceSession extends [^{]*CybernestConversationCaptureSession/u,
+    );
+    expect(source).not.toContain("CybernestConversationCaptureOverseer");
+    expect(apiSource).toMatch(
+        /export interface Overseer extends RpcTarget, CybernestConversationCaptureOverseer/u,
+    );
+  });
+
   it("creates only known safe errors", () => {
     const error = createCybernestError("cybernest.blocked_action", "Action is not reviewable.");
 
@@ -86,6 +204,7 @@ describe("Cybernest Workspace shared contract", () => {
       "Overseer",
       "GadgetClient",
       "Gatekeeper",
+      "KnowledgeBase",
       "provider",
       "cybernest.forbidden_method",
       "Uint8Array",
