@@ -27,6 +27,8 @@ import type {
   CybernestChatMessage,
   CybernestChatMetadata,
   CybernestChatSubscriber,
+  CybernestConversationDraft,
+  CybernestConversationSaveResult,
   CybernestMetadataSubscriber,
   CybernestModel,
   CybernestOutputList,
@@ -57,6 +59,122 @@ const unavailable = (message: string): never => {
 
 const invalidMutation = (message: string): never => {
   throw createCybernestError("cybernest.invalid_mutation", message);
+};
+
+const CONVERSATION_CONTEXT_DOCUMENT_KEY = "conversation-context";
+const MAX_CONVERSATION_CONTENT_BYTES = 1_048_576;
+const CANONICAL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
+const SAFE_CAPTURE_ERROR_CODES = new Set([
+  "cybernest.unauthorized",
+  "cybernest.invalid_model",
+  "cybernest.invalid_mutation",
+  "cybernest.os_unavailable",
+  "cybernest.unknown_result",
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
+  return Object.keys(value).length === keys.length &&
+      keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+};
+
+const hasUnpairedSurrogate = (value: string): boolean => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const validConversationText = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.trim().length > 0 &&
+  !hasUnpairedSurrogate(value) &&
+  new TextEncoder().encode(value).byteLength <= MAX_CONVERSATION_CONTENT_BYTES;
+
+const parseConversationDraft = (
+    value: unknown,
+    fail: (message: string) => never,
+): CybernestConversationDraft => {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    "baseSourceRevisionId",
+    "content",
+    "contentHash",
+    "documentKey",
+    "revisionId",
+  ])) {
+    return fail("Invalid conversation draft.");
+  }
+  if (
+    typeof value.revisionId !== "string" || !CANONICAL_UUID.test(value.revisionId) ||
+    value.documentKey !== CONVERSATION_CONTEXT_DOCUMENT_KEY ||
+    (value.baseSourceRevisionId !== null &&
+      (typeof value.baseSourceRevisionId !== "string" ||
+        !CANONICAL_UUID.test(value.baseSourceRevisionId))) ||
+    typeof value.contentHash !== "string" || !SHA256_HEX.test(value.contentHash) ||
+    !validConversationText(value.content)
+  ) {
+    return fail("Invalid conversation draft.");
+  }
+  return {
+    revisionId: value.revisionId,
+    documentKey: value.documentKey,
+    baseSourceRevisionId: value.baseSourceRevisionId,
+    contentHash: value.contentHash,
+    content: value.content,
+  };
+};
+
+const parseConversationSaveResult = (
+    value: unknown,
+    draft: CybernestConversationDraft,
+): CybernestConversationSaveResult => {
+  if (!isRecord(value) || !hasExactKeys(value, ["contentHash", "documentKey", "revisionId"])) {
+    return unknownResult("Invalid conversation save result.");
+  }
+  if (
+    typeof value.revisionId !== "string" || !CANONICAL_UUID.test(value.revisionId) ||
+    value.documentKey !== CONVERSATION_CONTEXT_DOCUMENT_KEY ||
+    typeof value.contentHash !== "string" || !SHA256_HEX.test(value.contentHash) ||
+    value.revisionId !== draft.revisionId ||
+    value.documentKey !== draft.documentKey ||
+    value.contentHash !== draft.contentHash
+  ) {
+    return unknownResult("Invalid conversation save result.");
+  }
+  return {
+    revisionId: value.revisionId,
+    documentKey: value.documentKey,
+    contentHash: value.contentHash,
+  };
+};
+
+const captureErrorMessage = (code: string): string => {
+  switch (code) {
+    case "cybernest.unauthorized": return "Conversation capture is not authorized.";
+    case "cybernest.invalid_model": return "Selected model is unavailable.";
+    case "cybernest.invalid_mutation": return "Conversation capture request is invalid.";
+    case "cybernest.unknown_result": return "Conversation capture returned an invalid result.";
+    default: return "Conversation capture is unavailable.";
+  }
+};
+
+const mapCaptureError = (error: unknown): never => {
+  const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+  if (code !== undefined && SAFE_CAPTURE_ERROR_CODES.has(code)) {
+    throw createCybernestError(code as Parameters<typeof createCybernestError>[0], captureErrorMessage(code));
+  }
+  return unavailable("Conversation capture is unavailable.");
 };
 
 const assertString = (value: unknown, field: string): string => {
@@ -566,6 +684,28 @@ class CybernestWorkspaceSessionImpl extends RpcTarget implements CybernestWorksp
     chatId = assertNonNegativeInteger(chatId, "chat id");
     await this.#assertModel(modelId);
     await this.native.retryAgent(chatId, modelId);
+  }
+
+  async organizeChat(chatId: number, modelId: string | null): Promise<CybernestConversationDraft> {
+    chatId = assertNonNegativeInteger(chatId, "chat id");
+    try {
+      await this.#assertModel(modelId);
+      return parseConversationDraft(await this.native.organizeChat(chatId, modelId), unknownResult);
+    } catch (error) {
+      return mapCaptureError(error);
+    }
+  }
+
+  async saveConversation(
+      chatId: number, draft: CybernestConversationDraft): Promise<CybernestConversationSaveResult> {
+    chatId = assertNonNegativeInteger(chatId, "chat id");
+    draft = parseConversationDraft(draft, invalidMutation);
+    try {
+      return parseConversationSaveResult(
+          await this.native.saveConversation(chatId, draft), draft);
+    } catch (error) {
+      return mapCaptureError(error);
+    }
   }
 
   async listActions(): Promise<CybernestAction[]> {
