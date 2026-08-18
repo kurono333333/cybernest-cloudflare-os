@@ -9,7 +9,35 @@ export interface CybernestWorkspaceApi extends RpcTarget {
   listOutputs(): Promise<CybernestOutputList>;
 }
 
-export interface CybernestWorkspaceSession extends RpcTarget {
+/** A non-persistent, user-reviewable result of organizing one chat. */
+export type CybernestConversationDraft = {
+  revisionId: string;
+  documentKey: string;
+  baseSourceRevisionId: string | null;
+  contentHash: string;
+  content: string;
+};
+
+/** The result returned after a reviewed conversation draft is saved. */
+export type CybernestConversationSaveResult = {
+  revisionId: string;
+  documentKey: string;
+  contentHash: string;
+};
+
+/** Owner-scoped conversation capture methods added to Workspace in a later adapter Micro. */
+export interface CybernestConversationCaptureSession extends RpcTarget {
+  organizeChat(
+    chatId: number,
+    modelId: string | null,
+  ): Promise<CybernestConversationDraft>;
+  saveConversation(
+    chatId: number,
+    draft: CybernestConversationDraft,
+  ): Promise<CybernestConversationSaveResult>;
+}
+
+export interface CybernestWorkspaceSession extends CybernestConversationCaptureSession {
   getMetadata(): Promise<CybernestWorkspaceMetadata>;
   subscribeToMetadata(callback: CybernestMetadataSubscriber): Promise<CybernestSubscription>;
 

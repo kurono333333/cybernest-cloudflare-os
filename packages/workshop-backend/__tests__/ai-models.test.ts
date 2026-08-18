@@ -102,6 +102,20 @@ describe("getModel AI Gateway routing", () => {
     });
   }, 15000);
 
+  it("labels conversation organization separately in gateway metadata", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
+      metadata: {source: "conversation-organize", gadgetId: "gadget-123", chatId: 7},
+    });
+
+    const request = await captureRequest(handle);
+    expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toEqual({
+      user: "user-123",
+      source: "conversation-organize",
+      gadgetId: "gadget-123",
+      chatId: 7,
+    });
+  }, 15000);
+
   it("routes Google through the gateway's google-ai-studio passthrough", () => {
     // The @google/genai SDK sends its API key as `x-goog-api-key`, which AI Gateway forwards to
     // the provider verbatim (taking precedence over the gateway's stored keys), so the documented

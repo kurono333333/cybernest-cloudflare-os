@@ -3,6 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
 import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
 import type {
+  CybernestConversationCaptureSession,
   CybernestWorkspaceApi,
   CybernestWorkspaceSession,
 } from "@gadgets/workshop-shared/cybernest-workspace-api";
@@ -14,7 +15,8 @@ type Session<T extends RpcTarget = AuthenticatedApi> = {
   socket?: WebSocket;
 };
 
-type RestrictedWorkspaceSessionProbe = CybernestWorkspaceSession & {
+type RestrictedWorkspaceSessionProbe = CybernestWorkspaceSession &
+  CybernestConversationCaptureSession & {
   deleteSelf(): Promise<void>;
   setTitle(title: string): Promise<void>;
   updateCode(update: Uint8Array): Promise<void>;
