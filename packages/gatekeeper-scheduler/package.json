@@ -18,13 +18,13 @@
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/error-reporting": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "^0.8.0",
-    "capnweb-validate": "0.2.1",
+    "capnweb": "^0.12.0",
+    "capnweb-validate": "0.3.0",
     "temporal-polyfill": "1.0.2"
   },
   "devDependencies": {
     "@cloudflare/kumo": "^2.9.0",
-    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.1.0",
@@ -41,7 +41,7 @@
     "vite": "^7.3.6",
     "vite-plugin-singlefile": "^2.3.3",
     "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.119.0"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.126.0"
   }
 }

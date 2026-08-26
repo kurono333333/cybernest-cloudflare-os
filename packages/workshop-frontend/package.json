@@ -18,7 +18,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-router": "^1.170.18",
-    "capnweb": "^0.8.0",
+    "capnweb": "^0.12.0",
     "hash-wasm": "^4.12.0",
     "monaco-editor": "^0.52.2",
     "react": "^19.2.8",
@@ -39,6 +39,6 @@
     "jsdom": "^26.1.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
