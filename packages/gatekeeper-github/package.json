@@ -16,12 +16,12 @@
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "^0.8.0",
-    "capnweb-validate": "0.2.1"
+    "capnweb": "^0.12.0",
+    "capnweb-validate": "0.3.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.119.0"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.126.0"
   }
 }
