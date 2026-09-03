@@ -94,7 +94,11 @@ function workshopConfig(
   }));
 
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
-  config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
+  // The checked-in Cybernest config is private-only, but this generic integration suite exercises
+  // the public API contract. Do not let the deployment mode leak into the inline public harness.
+  const vars: Record<string, unknown> = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
+  delete vars.CYBERNEST_PRIVATE_MANAGER_RUNTIME;
+  config.vars = vars;
 
   // Gadget code is never executed here (a gatekeeper is in observer scope purely by having a
   // vendorId), so drop the Worker Loader rather than requiring it to start.
