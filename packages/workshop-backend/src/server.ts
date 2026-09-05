@@ -1,4 +1,4 @@
-import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
+import { RpcStub, RpcTarget, newWebSocketRpcSession, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
@@ -28,7 +28,6 @@ import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
-import { CybernestWorkspaceApiImpl } from "./cybernest-workspace-api";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -86,7 +85,7 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
 /**
  * Test-only native regression entrypoint. It is intentionally not mounted as an HTTP route and is
  * only bound by the Core manager-runtime integration harness. The product Manager WebSocket above
- * always exposes CybernestWorkspaceApi instead.
+ * exposes the native AuthenticatedApi instead.
  */
 @validateRpc()
 export class ManagerNativeRegressionEntrypoint extends WorkerEntrypoint<Env> {
@@ -134,6 +133,18 @@ const CYBERNEST_MANAGER_UUID =
 function cybernestManagerId(req: Request): string | null {
   const value = req.headers.get(CYBERNEST_MANAGER_HEADER);
   return value !== null && CYBERNEST_MANAGER_UUID.test(value) ? value : null;
+}
+
+const CYBERNEST_PRIVATE_LEASE_HEADER = "X-Cybernest-Private-Lease-Expires-At";
+const MAX_CYBERNEST_PRIVATE_LEASE_MS = 300_000;
+
+function cybernestPrivateLeaseExpiresAt(req: Request, nowMs: number): number | null {
+  const value = req.headers.get(CYBERNEST_PRIVATE_LEASE_HEADER);
+  if (value === null || !/^[0-9]+$/u.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) return null;
+  if (parsed <= nowMs || parsed > nowMs + MAX_CYBERNEST_PRIVATE_LEASE_MS) return null;
+  return parsed;
 }
 
 function isCybernestPrivateRuntime(env: Env): boolean {
@@ -733,12 +744,58 @@ async function handleCybernestManagerEndpoint(
   return new Response(null, {status: 404});
 }
 
+function waitForPrivateLeaseClose(
+    socket: WebSocket, leaseExpiresAt: number): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timer !== undefined) clearTimeout(timer);
+      socket.removeEventListener("close", finish);
+      resolve();
+    };
+
+    socket.addEventListener("close", finish, {once: true});
+    if (finished) return;
+    timer = setTimeout(() => {
+      try {
+        socket.close(1000, "private manager lease expired");
+      } finally {
+        finish();
+      }
+    }, Math.max(0, leaseExpiresAt - Date.now()));
+  });
+}
+
+function newPrivateNativeWebSocketResponse(
+    localMain: RpcTarget): {response: Response; server: WebSocket} {
+  const pair = new WebSocketPair();
+  const server = pair[0];
+  server.accept();
+  newWebSocketRpcSession(server, localMain);
+  return {
+    response: new Response(null, {
+      status: 101,
+      webSocket: pair[1],
+    }),
+    server,
+  };
+}
+
 async function handleCybernestPrivateApi(
   req: Request, env: Env, ctx: ExecutionContext, managerId: string): Promise<Response> {
   if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
     return new Response(null, {status: 400});
   }
 
+  const leaseExpiresAt = cybernestPrivateLeaseExpiresAt(req, Date.now());
+  if (leaseExpiresAt === null) {
+    return new Response(null, {status: 503});
+  }
   const manager = await lookupCybernestManager(ctx, managerId);
   if (manager._tag !== "ready") {
     return new Response(null, {status: 503});
@@ -748,6 +805,7 @@ async function handleCybernestPrivateApi(
   // upstream Workshop. Cybernest supplies the already-owned User DO; it does not duplicate the
   // public authentication protocol or query the DO's SQLite state.
   let resp: Response | undefined;
+  let nativeSocket: WebSocket | undefined;
   let aborted = false;
   const abortSession = (reason: Error) => {
     logger.warn("aborting private manager api session", {
@@ -759,9 +817,19 @@ async function handleCybernestPrivateApi(
   };
 
   const nativeApi = new AuthenticatedApiImpl(ctx, env, manager.user, abortSession);
-  resp = await newWorkersRpcResponse(req, new CybernestWorkspaceApiImpl(nativeApi));
-  if (aborted) resp?.webSocket?.close();
-  return resp;
+  const nativeResponse = newPrivateNativeWebSocketResponse(
+    nativeApi,
+  );
+  nativeSocket = nativeResponse.server;
+  const response = nativeResponse.response;
+  resp = response;
+  if (aborted) {
+    nativeSocket.close();
+    response.webSocket?.close();
+  } else {
+    void waitForPrivateLeaseClose(nativeSocket, leaseExpiresAt);
+  }
+  return response;
 }
 
 async function handleCybernestPrivateRuntimeRequest(

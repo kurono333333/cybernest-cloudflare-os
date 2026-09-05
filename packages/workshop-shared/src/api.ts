@@ -316,6 +316,35 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/** Maximum number of messages returned by one native checkpoint history page. */
+export const CHAT_HISTORY_MAX_MESSAGES = 500;
+
+/** Maximum UTF-8 bytes across string values in one native history response. */
+export const CHAT_HISTORY_MAX_TEXT_BYTES = 2_097_152;
+
+/** Stable error codes attached to bounded chat-history failures. */
+export const CHAT_HISTORY_ERROR_CODES = {
+  messageLimitExceeded: "CHAT_HISTORY_MESSAGE_LIMIT_EXCEEDED",
+  textLimitExceeded: "CHAT_HISTORY_TEXT_LIMIT_EXCEEDED",
+} as const;
+
+/** An expected bounded chat-history failure code. */
+export type ChatHistoryErrorCode =
+    typeof CHAT_HISTORY_ERROR_CODES[keyof typeof CHAT_HISTORY_ERROR_CODES];
+
+const chatHistoryErrors = codedErrorFamily<ChatHistoryErrorCode>({
+  [CHAT_HISTORY_ERROR_CODES.messageLimitExceeded]:
+    "Chat history message limit exceeded.",
+  [CHAT_HISTORY_ERROR_CODES.textLimitExceeded]:
+    "Chat history text limit exceeded.",
+});
+
+/** Creates a bounded chat-history error with a machine-readable code. */
+export const createChatHistoryError = chatHistoryErrors.create;
+
+/** Reads the machine-readable code from a bounded chat-history error. */
+export const getChatHistoryErrorCode = chatHistoryErrors.getCode;
+
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Get profile info for the user who is logged in.
@@ -1509,8 +1538,10 @@ export interface Overseer extends RpcTarget, CybernestConversationCaptureOversee
   // chosen something else.
   listModels(): Promise<AiChatAuthorInfo[]>;
 
-  // Fetch one page of messages in the chat history for the given chat thread. If `beforeSequence`
-  // is absent, fetch the current tail. Otherwise, fetch messages before that sequence.
+  // Fetch one checkpoint-delimited page of messages in the chat history for the given chat
+  // thread. If `beforeSequence` is absent, fetch the current tail. Otherwise, fetch messages
+  // before that sequence. A checkpoint page is returned whole or rejected with a code from
+  // `CHAT_HISTORY_ERROR_CODES`; it is never silently truncated.
   //
   // Note that if you plan to subscribe to updates, you should initiate the subscription first,
   // before fetching history. Otherwise, you could theoretically miss a message that is sent
