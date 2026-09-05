@@ -3,9 +3,11 @@ import capnwebValidate from "capnweb-validate/vite";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
-const EXPECTED_OPEN_ERROR_CODES = new Set([
+const EXPECTED_RPC_ERROR_CODES = new Set([
   "WORKSPACE_NOT_FOUND",
   "WORKSPACE_ACCESS_DENIED",
+  "CHAT_HISTORY_MESSAGE_LIMIT_EXCEEDED",
+  "CHAT_HISTORY_TEXT_LIMIT_EXCEEDED",
 ]);
 
 const EXPECTED_MANAGER_KNOWLEDGE_ERRORS = new Set([
@@ -57,7 +59,7 @@ export default defineConfig({
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {
       const code = "code" in error ? error.code : undefined;
-      if (typeof code === "string" && EXPECTED_OPEN_ERROR_CODES.has(code)) return false;
+      if (typeof code === "string" && EXPECTED_RPC_ERROR_CODES.has(code)) return false;
       const message =
         typeof error === "object" &&
         error !== null &&
@@ -71,7 +73,7 @@ export default defineConfig({
           message.includes("This Manager runtime is private") ||
           message.includes("A private Manager runtime cannot keep shared users") ||
           message.includes("You don't have access to this workspace") ||
-          /^capnweb-validate: refused /u.test(message) ||
+          message.startsWith("capnweb-validate: refused ") ||
           /^'[^']+' is not a function\.$/u.test(message))
       ) {
         return false;

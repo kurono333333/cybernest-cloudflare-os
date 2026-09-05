@@ -1,9 +1,18 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { env, runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
-import type { AuthenticatedApi, GadgetMetadataWithTimestamps } from "@gadgets/workshop-shared/api";
+import {
+  CHAT_HISTORY_ERROR_CODES,
+  getChatHistoryErrorCode,
+  type AiChatMessage,
+  type AiChatMetadata,
+  type AuthenticatedApi,
+  type GadgetMetadataWithTimestamps,
+  type Overseer,
+} from "@gadgets/workshop-shared/api";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, it } from "vitest";
+import type { CompactionCheckpoint } from "../src/agent";
 
 type Session<T extends RpcTarget = AuthenticatedApi> = {
   api: RpcStub<T>;
@@ -34,6 +43,35 @@ type WorkspaceStorageFixture = {
     };
   };
 };
+
+type ChatHistoryStorageFixture = {
+  impl: {
+    storage: {
+      chats: {
+        put(message: AiChatMessage): void;
+        list(): Iterable<AiChatMessage>;
+      };
+      chatMeta: {
+        get(chatId: number): AiChatMetadata | undefined;
+        put(metadata: AiChatMetadata): void;
+      };
+      chatCompactions: {
+        put(checkpoint: CompactionCheckpoint): void;
+        list(): Iterable<CompactionCheckpoint>;
+      };
+    };
+  };
+};
+
+type ChatHistorySnapshot = {
+  messages: AiChatMessage[];
+  metadata: AiChatMetadata | undefined;
+  checkpoints: CompactionCheckpoint[];
+};
+
+type CodedError = Error & {code?: unknown};
+
+const historyAuthor = {type: "user" as const, id: "history-user", name: "History User"};
 
 const managerId = (): string => crypto.randomUUID();
 
@@ -123,6 +161,83 @@ async function waitForGadget(
   throw new Error(`Timed out waiting for Gadget ${id}.`);
 }
 
+function historyMessage(chatId: number, sequence: number, text: string): AiChatMessage {
+  return {
+    chatId,
+    sequence,
+    timestamp: new Date(sequence),
+    author: historyAuthor,
+    type: "message",
+    message: text,
+  };
+}
+
+function historyCheckpoint(
+    chatId: number, compactedTo: number, summary: string): CompactionCheckpoint {
+  return {
+    chatId,
+    compactedTo,
+    summary,
+    chatBindings: [],
+    nextChangeId: 1,
+  };
+}
+
+async function seedHistory(
+    workspaceId: string,
+    chatId: number,
+    messages: AiChatMessage[],
+    checkpoints: CompactionCheckpoint[] = [],
+    activeCompactedTo?: number,
+): Promise<void> {
+  const stub = exports.OverseerDurableObject.get(
+      exports.OverseerDurableObject.idFromString(workspaceId),
+  );
+  await runInDurableObject(stub, async (instance) => {
+    const storage = (instance as unknown as ChatHistoryStorageFixture).impl.storage;
+    storage.chatMeta.put({
+      id: chatId,
+      title: `History ${chatId}`,
+      started: new Date(0),
+      lastActive: new Date(messages.at(-1)?.timestamp.valueOf() ?? 0),
+      ...(activeCompactedTo === undefined ? {} : {compactedTo: activeCompactedTo}),
+    });
+    for (const message of messages) storage.chats.put(message);
+    for (const checkpoint of checkpoints) storage.chatCompactions.put(checkpoint);
+  });
+}
+
+async function readHistorySnapshot(
+    workspaceId: string, chatId: number): Promise<ChatHistorySnapshot> {
+  const stub = exports.OverseerDurableObject.get(
+      exports.OverseerDurableObject.idFromString(workspaceId),
+  );
+  return runInDurableObject(stub, async (instance) => {
+    const storage = (instance as unknown as ChatHistoryStorageFixture).impl.storage;
+    return {
+      messages: [...storage.chats.list()]
+        .filter(message => message.chatId === chatId)
+        .toSorted((left, right) => left.sequence - right.sequence),
+      metadata: storage.chatMeta.get(chatId),
+      checkpoints: [...storage.chatCompactions.list()]
+        .filter(checkpoint => checkpoint.chatId === chatId)
+        .toSorted((left, right) => left.compactedTo - right.compactedTo),
+    };
+  });
+}
+
+async function rejectedError(call: PromiseLike<unknown>): Promise<CodedError> {
+  try {
+    await call;
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      throw new TypeError("Expected native RPC to reject with an Error.", {cause: error});
+    }
+    return error;
+  }
+  throw new Error("Expected native RPC to reject.");
+}
+
 describe("Cybernest Manager runtime", () => {
   it("exposes the native AuthenticatedApi at the product private root", async () => {
     const id = managerId();
@@ -145,6 +260,105 @@ describe("Cybernest Manager runtime", () => {
       close(session);
     }
   });
+
+  it("keeps native checkpoint pages intact while paging backward", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectProductNative(id);
+    let workspace: RpcStub<Overseer> | undefined;
+    try {
+      workspace = await session.api.newGadget();
+      const workspaceId = (await workspace.getMetadata()).id;
+      const chatId = 41;
+      await seedHistory(
+        workspaceId,
+        chatId,
+        [1, 2, 3, 4].map(sequence => historyMessage(chatId, sequence, `message-${sequence}`)),
+        [
+          historyCheckpoint(chatId, 2, "summary-before-2"),
+          historyCheckpoint(chatId, 3, "summary-before-3"),
+        ],
+        3,
+      );
+
+      const current = await workspace.getChatHistory(chatId);
+      expect(current.messages.map(message => message.sequence)).toEqual([3, 4]);
+      expect(current.compacted).toMatchObject({to: 3, summary: "summary-before-3"});
+
+      const previous = await workspace.getChatHistory(chatId, current.compacted!.to);
+      expect(previous.messages.map(message => message.sequence)).toEqual([2]);
+      expect(previous.compacted).toMatchObject({to: 2, summary: "summary-before-2"});
+
+      const first = await workspace.getChatHistory(chatId, previous.compacted!.to);
+      expect(first.messages.map(message => message.sequence)).toEqual([1]);
+      expect(first.compacted).toBeUndefined();
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(session);
+    }
+  });
+
+  it("rejects a 501-message checkpoint page over private native RPC without mutation", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectProductNative(id);
+    let workspace: RpcStub<Overseer> | undefined;
+    try {
+      workspace = await session.api.newGadget();
+      const workspaceId = (await workspace.getMetadata()).id;
+      const chatId = 42;
+      await seedHistory(
+        workspaceId,
+        chatId,
+        Array.from({length: 501}, (_, index) =>
+          historyMessage(chatId, index + 1, `message-${index + 1}`)),
+      );
+      const before = await readHistorySnapshot(workspaceId, chatId);
+
+      const error = await rejectedError(workspace.getChatHistory(chatId));
+      expect(error.code).toBe(CHAT_HISTORY_ERROR_CODES.messageLimitExceeded);
+      expect(getChatHistoryErrorCode(error)).toBe(
+        CHAT_HISTORY_ERROR_CODES.messageLimitExceeded,
+      );
+      await expect(readHistorySnapshot(workspaceId, chatId)).resolves.toEqual(before);
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(session);
+    }
+  }, 15_000);
+
+  it("rejects an over-budget UTF-8 page over private native RPC without mutation", async () => {
+    const id = managerId();
+    await ensure(id);
+
+    const session = await connectProductNative(id);
+    let workspace: RpcStub<Overseer> | undefined;
+    try {
+      workspace = await session.api.newGadget();
+      const workspaceId = (await workspace.getMetadata()).id;
+      const chatId = 43;
+      const chunk = "界".repeat(22_000);
+      await seedHistory(
+        workspaceId,
+        chatId,
+        Array.from({length: 33}, (_, index) =>
+          historyMessage(chatId, index + 1, chunk)),
+      );
+      const before = await readHistorySnapshot(workspaceId, chatId);
+
+      const error = await rejectedError(workspace.getChatHistory(chatId));
+      expect(error.code).toBe(CHAT_HISTORY_ERROR_CODES.textLimitExceeded);
+      expect(getChatHistoryErrorCode(error)).toBe(
+        CHAT_HISTORY_ERROR_CODES.textLimitExceeded,
+      );
+      await expect(readHistorySnapshot(workspaceId, chatId)).resolves.toEqual(before);
+    } finally {
+      workspace?.[Symbol.dispose]();
+      close(session);
+    }
+  }, 15_000);
 
   it("rejects the 101st owned workspace and keeps the list bounded", async () => {
     const id = managerId();
