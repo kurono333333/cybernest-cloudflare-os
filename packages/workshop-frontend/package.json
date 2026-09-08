@@ -2,6 +2,12 @@
   "name": "@gadgets/workshop-frontend",
   "version": "1.0.0",
   "type": "module",
+  "exports": {
+    "./gadget-ui": {
+      "types": "./src/gadget-ui.ts",
+      "import": "./src/gadget-ui.ts"
+    }
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
