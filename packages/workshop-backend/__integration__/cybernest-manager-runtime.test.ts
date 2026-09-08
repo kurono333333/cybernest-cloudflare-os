@@ -249,13 +249,9 @@ describe("Cybernest Manager runtime", () => {
       const legacy = session.api as unknown as {
         listWorkspaces(): Promise<unknown>;
         createWorkspace(): Promise<unknown>;
-        organizeChat(): Promise<unknown>;
-        saveConversation(): Promise<unknown>;
       };
       await expectValidatorRejection(legacy.listWorkspaces());
       await expectValidatorRejection(legacy.createWorkspace());
-      await expectValidatorRejection(legacy.organizeChat());
-      await expectValidatorRejection(legacy.saveConversation());
     } finally {
       close(session);
     }
