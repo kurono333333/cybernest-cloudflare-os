@@ -135,7 +135,8 @@ export default function GadgetUI(props: GadgetUIProps) {
 
 function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  // The first render must be loading; the bundle effect runs after render.
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [hasLoaded, setHasLoaded] = useState(false)
   const [isInvalidated, setIsInvalidated] = useState(false)
