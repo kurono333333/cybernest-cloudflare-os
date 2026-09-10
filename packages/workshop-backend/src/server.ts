@@ -136,7 +136,7 @@ function cybernestManagerId(req: Request): string | null {
 }
 
 const CYBERNEST_PRIVATE_LEASE_HEADER = "X-Cybernest-Private-Lease-Expires-At";
-const MAX_CYBERNEST_PRIVATE_LEASE_MS = 300_000;
+const MAX_CYBERNEST_PRIVATE_LEASE_MS = 1_800_000;
 
 function cybernestPrivateLeaseExpiresAt(req: Request, nowMs: number): number | null {
   const value = req.headers.get(CYBERNEST_PRIVATE_LEASE_HEADER);

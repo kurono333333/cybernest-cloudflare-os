@@ -431,6 +431,23 @@ describe("Cybernest Manager runtime", () => {
     }
   });
 
+  it("accepts a private lease within the thirty-minute server bound", async () => {
+    const id = managerId();
+    await ensure(id);
+    const response = await exports.default.fetch(new Request("https://workshop.invalid/api", {
+      headers: {
+        Upgrade: "websocket",
+        ...privateManagerHeaders(id, Date.now() + 1_799_000),
+      },
+    }));
+
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (!socket) throw new TypeError("Expected a WebSocket response.");
+    socket.accept();
+    socket.close();
+  });
+
   it("rejects missing or malformed private context without opening the OS API", async () => {
     const knownManager = managerId();
     expect((await managerRequest("/_cybernest/manager", "GET")).status).toBe(400);
@@ -470,7 +487,7 @@ describe("Cybernest Manager runtime", () => {
     const overlongLeaseApi = await exports.default.fetch(new Request("https://workshop.invalid/api", {
       headers: {
         Upgrade: "websocket",
-        ...privateManagerHeaders(knownManager, Date.now() + 301_000),
+        ...privateManagerHeaders(knownManager, Date.now() + 1_801_000),
       },
     }));
     expect(overlongLeaseApi.status).toBe(503);
