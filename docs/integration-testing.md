@@ -79,19 +79,13 @@ One corollary that is easy to get wrong: the "nothing escaped to the internet" a
 running, so it would inspect and clear state they are still using — and could discard an escape a
 sibling was about to be blamed for.
 
-### wrangler and workerd versions are coupled
+### wrangler and miniflare versions are coupled
 
-The public repo pins `workerd` through a root `overrides` entry, which collapses every transitive
-request to one version. A newer `wrangler` brings a newer `miniflare` that demands a newer `workerd`
-than the override yields, and the harness then fails to boot:
-
-```
-The Workers runtime failed to start ... requires compatibility date "2026-07-08",
-but the newest date supported by this server binary is "2026-06-30".
-```
-
-So the public package pins `wrangler` to `~4.104.0` — the release whose bundled `workerd` matches the
-override. Bumping it means bumping the override in step.
+Nothing pins `workerd` directly: `wrangler` and `miniflare` each depend on an exact `workerd`. The
+catalog in `pnpm-workspace.yaml` pins `miniflare` exactly, to the prerelease the catalog `wrangler`
+depends on, and its `overrides` point `@cloudflare/vitest-pool-workers` at those same catalog
+versions, so the lockfile resolves one Wrangler/Miniflare/workerd stack. Bump `wrangler` and
+`miniflare` together; letting them drift installs a second stack.
 
 ### A consumer in another repo can end up with two copies of capnweb
 
@@ -110,9 +104,10 @@ locally, do the same.
 
 The toolkit therefore owns the capnweb boundary: mint callback stubs with `stubFor()` from
 `rpc-client`, never with an imported `RpcStub`. Importing `RpcStub` as a *type* is fine. This is
-enforced structurally in this repo — `.oxlintrc.json` restricts `capnweb` value imports within this
-package to `rpc-client.ts` (`allowTypeImports` leaves type imports alone). A consumer repo without a
-linter should treat the rule as a convention its test files follow via `stubFor()`.
+enforced structurally in this repo — the lint rules in `vite.config.ts` restrict `capnweb` value
+imports within this package to `rpc-client.ts` (`allowTypeImports` leaves type imports alone). A
+consumer repo without a linter should treat the rule as a convention its test files follow via
+`stubFor()`.
 
 ### Worker entry modules may export only classes and the default handler
 
