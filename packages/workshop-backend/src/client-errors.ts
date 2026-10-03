@@ -2,8 +2,8 @@ import {
   normalizeFrontendErrorReport,
   type FrontendErrorReportV1,
 } from "@gadgets/error-reporting";
-import type { ErrorEventV1, ErrorReporter } from "@gadgets/backend-utils/error-reporting";
-import { createLogger } from "@gadgets/backend-utils/logger";
+import type { ErrorEventV1, ErrorReporter } from "@gadgets/observability/error-reporting";
+import { createLogger } from "@gadgets/observability/logger";
 import type { JWTPayload } from "jose";
 import {
   accessRateLimitKey,
@@ -67,6 +67,8 @@ function toReporterEvent(report: FrontendErrorReportV1): ErrorEventV1 {
     captureMechanism: report.captureMechanism,
     surface: report.surface,
     ...(report.sessionId && { sessionId: report.sessionId }),
+    ...(report.pageLocation && { pageLocation: report.pageLocation }),
+    ...(report.reportedUserId && { reportedUserId: report.reportedUserId }),
     ...(report.gadgetId && { gadgetId: report.gadgetId }),
     ...(report.gatekeeperVendorId && { gatekeeperVendorId: report.gatekeeperVendorId }),
     ...(report.browser?.family && { browserFamily: report.browser.family }),

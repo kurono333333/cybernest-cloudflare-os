@@ -21,6 +21,7 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
+import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -35,8 +36,10 @@ interface ConnectionsProps {
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
 }
 
-// Auto-approval rules live in Activity because they apply across the workspace, while this view is
-// scoped to one gadget.
+/**
+ * Auto-approval rules live in Activity because they apply across the workspace, while this view is
+ * scoped to one gadget.
+ */
 export default function Connections({ overseer, gadget, chatId, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [bindings, setBindings] = useState<GadgetBindingInfo[]>([])
   // Identity of the gadget this tab is showing, needed to offer it to agent spawners.
@@ -118,9 +121,16 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
+  // Keyed on the `gadget` stub rather than `overseer`, even though the load uses both. The gadget
+  // stub is derived from the overseer by an effect in the parent, so on reconnect it arrives one
+  // render *after* the replacement overseer: keying on `overseer` fired this load while `gadget`
+  // still pointed into the dead session (a guaranteed spurious failure), and then never fired
+  // again once the live stub showed up, leaving the panel showing pre-disconnect state. Keying on
+  // the derived stub can't observe that intermediate render, and a new overseer always yields a
+  // new gadget stub, so reconnects are still covered.
   useEffect(() => {
     loadGatekeepers()
-  }, [overseer, chatId])
+  }, [gadget, chatId])
 
   // Re-load when the tab becomes visible, so hooks enabled elsewhere (e.g. from the Activity log)
   // show up without a full page reload.
@@ -268,6 +278,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           value={editValue}
                           onChange={(e) => setEditValue(e.target.value)}
                           onKeyDown={(e) => {
+                            if (isImeComposing(e)) return
                             if (e.key === 'Enter') handleEditSave(gk.name)
                             if (e.key === 'Escape') handleEditCancel()
                           }}
@@ -546,8 +557,8 @@ function BlueprintAnnotationModal({
   return (
     <>
       <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-        <Dialog className="!z-[1000] !w-[min(480px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="lg">
-          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-4 py-4 sm:px-5">
+        <Dialog className="responsive-dialog !z-[1000] !top-[clamp(24px,10vh,80px)] !flex !max-h-[calc(100vh-clamp(24px,10vh,80px)-24px)] !w-[min(480px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0" size="lg">
+          <div className="flex shrink-0 items-start justify-between gap-4 border-b border-kumo-line px-4 py-4 sm:px-5">
             <div className="min-w-0">
               <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
                 Blueprint settings
@@ -565,7 +576,7 @@ function BlueprintAnnotationModal({
             />
           </div>
 
-          <div className="space-y-4 px-4 py-4 sm:px-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
             {loadError ? (
               <div className="text-[13px] text-kumo-subtle">{loadError}</div>
             ) : !data ? (
@@ -582,7 +593,7 @@ function BlueprintAnnotationModal({
             )}
           </div>
 
-          <div className="border-t border-kumo-line px-4 py-3 sm:px-5">
+          <div className="shrink-0 border-t border-kumo-line px-4 py-3 sm:px-5">
             {saveError && (
               <div className="mb-3 flex items-start gap-2 rounded-lg border border-l-2 border-l-kumo-brand border-y-kumo-line border-r-kumo-line bg-kumo-base px-3 py-2 text-[12px] leading-[18px] font-normal tracking-[-0.2px] text-kumo-default">
                 <Warning size={14} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" />
