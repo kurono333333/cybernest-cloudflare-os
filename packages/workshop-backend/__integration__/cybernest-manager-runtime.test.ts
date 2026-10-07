@@ -395,7 +395,6 @@ describe("Cybernest Manager runtime", () => {
       try {
         const metadata = await workspace.getMetadata();
         gadgetId = metadata.id;
-        await workspace.updateCode(new Uint8Array());
       } finally {
         workspace[Symbol.dispose]();
       }
