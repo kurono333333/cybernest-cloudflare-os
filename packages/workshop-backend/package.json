@@ -38,6 +38,7 @@
     "@types/pako": "^3.0.0",
     "dompurify": "^3.4.16",
     "esbuild": "^0.28.2",
+    "miniflare": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"
