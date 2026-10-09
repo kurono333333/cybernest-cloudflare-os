@@ -650,6 +650,12 @@ export interface AuthenticatedApi extends RpcTarget {
   newGadget(): Promise<RpcStub<Overseer>>;
 
   /**
+   * Resolve the current uniquely owned workspace, creating it only when explicitly prepared.
+   * `observe` is read-only and returns null when native metadata cannot identify one safe choice.
+   */
+  defaultWorkspace(mode: "prepare" | "observe"): Promise<string | null>;
+
+  /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
    *
    * Provisional gadgets are hidden.

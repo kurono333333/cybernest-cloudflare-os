@@ -495,6 +495,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return result;
   }
 
+  defaultWorkspace(mode: "prepare" | "observe"): Promise<string | null> {
+    return mode === "observe"
+      ? retryOnDoReset(() => this.#user.defaultWorkspace(mode))
+      : this.#user.defaultWorkspace(mode);
+  }
+
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     return retryOnDoReset(() => this.#user.listGadgets());
   }
