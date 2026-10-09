@@ -456,13 +456,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         name: "Manager",
         id: managerId,
       });
-      return;
+    } else {
+      const profile = this.storage.profile.get();
+      if (profile.type !== "user" || profile.id !== managerId) {
+        throw new Error("Cybernest manager profile does not match the User DO identity.");
+      }
     }
-
-    const profile = this.storage.profile.get();
-    if (profile.type !== "user" || profile.id !== managerId) {
-      throw new Error("Cybernest manager profile does not match the User DO identity.");
-    }
+    this.#syncDirectory();
   }
 
   #validateManagerKnowledgeRecord(value: unknown, slotId: number): ConnectedAccountRecord {

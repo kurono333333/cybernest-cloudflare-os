@@ -164,6 +164,17 @@ export interface PublicApi extends RpcTarget {
   downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
+/**
+ * Limited pre-authentication API for the private Cybernest OS connection. It exposes public
+ * Blueprint reads and accepts one short-lived connection proof to return that WebSocket's native
+ * AuthenticatedApi capability; the ordinary sign-in methods are not part of this surface.
+ */
+export interface CybernestConnectionBootstrapApi extends
+    RpcTarget, Pick<PublicApi, "getBlueprint" | "downloadBlueprint"> {
+  /** Validates the Manager connection proof and returns the authenticated capability for this socket. */
+  presentProof(proof: string): Promise<AuthenticatedApi>;
+}
+
 /** Subscription callback for AuthenticatedApi.subscribeConnectedAccounts(). */
 export interface ConnectedAccountsSubscriber {
   /**

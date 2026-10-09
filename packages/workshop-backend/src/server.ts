@@ -1,8 +1,8 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession,
   type RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { importJWK, jwtVerify, type JWK, type JWTPayload } from "jose";
+import { PublicApi, AuthenticatedApi, type CybernestConnectionBootstrapApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -137,27 +137,111 @@ type Env = Cloudflare.Env & {
 
 const CYBERNEST_MANAGER_HEADER = "X-Cybernest-Manager-Id";
 const CYBERNEST_MANAGER_UUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-
-function cybernestManagerId(req: Request): string | null {
-  const value = req.headers.get(CYBERNEST_MANAGER_HEADER);
-  return value !== null && CYBERNEST_MANAGER_UUID.test(value) ? value : null;
-}
-
-const CYBERNEST_PRIVATE_LEASE_HEADER = "X-Cybernest-Private-Lease-Expires-At";
-const MAX_CYBERNEST_PRIVATE_LEASE_MS = 1_800_000;
-
-function cybernestPrivateLeaseExpiresAt(req: Request, nowMs: number): number | null {
-  const value = req.headers.get(CYBERNEST_PRIVATE_LEASE_HEADER);
-  if (value === null || !/^[0-9]+$/u.test(value)) return null;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) return null;
-  if (parsed <= nowMs || parsed > nowMs + MAX_CYBERNEST_PRIVATE_LEASE_MS) return null;
-  return parsed;
-}
+    /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|f{8}-f{4}-f{4}-f{4}-f{12})$/u;
 
 function isCybernestPrivateRuntime(env: Env): boolean {
   return env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
+}
+
+const CYBERNEST_OS_CONNECTION_LIFETIME_MS = 3_600_000;
+const CYBERNEST_OS_CONNECTION_PROOF_LIFETIME_SECONDS = 60;
+const CYBERNEST_OS_CONNECTION_PROOF_CLAIMS = new Set([
+  "iss", "aud", "sub", "purpose", "environment", "deployment", "iat", "exp",
+]);
+
+type CybernestConnectionProofConfig = {
+  publicJwk: JWK;
+  issuer: string;
+  audience: string;
+  environment: string;
+  deployment: string;
+  allowedOrigins: Set<string>;
+};
+
+function cybernestConnectionProofConfig(env: Env): CybernestConnectionProofConfig | null {
+  const publicJwkText = env.CYBERNEST_OS_PROOF_PUBLIC_JWK;
+  const issuer = env.CYBERNEST_OS_PROOF_ISSUER;
+  const audience = env.CYBERNEST_OS_PROOF_AUDIENCE;
+  const environment = env.CYBERNEST_OS_PROOF_ENVIRONMENT;
+  const deployment = env.CYBERNEST_OS_PROOF_DEPLOYMENT;
+  const allowedOriginsText = env.CYBERNEST_OS_ALLOWED_ORIGINS;
+  if (!publicJwkText || !issuer || !audience || !environment || !deployment ||
+      !allowedOriginsText || [issuer, audience, environment, deployment].some(value =>
+        value.trim() !== value)) {
+    return null;
+  }
+
+  try {
+    const parsedJwk: unknown = JSON.parse(publicJwkText);
+    if (parsedJwk === null || typeof parsedJwk !== "object" || Array.isArray(parsedJwk)) {
+      return null;
+    }
+    const jwk = parsedJwk as Record<string, unknown>;
+    if (jwk.kty !== "EC" || jwk.crv !== "P-256" || typeof jwk.x !== "string" ||
+        typeof jwk.y !== "string" ||
+        ["d", "p", "q", "dp", "dq", "qi", "oth", "k"].some(name => name in jwk)) {
+      return null;
+    }
+
+    const parsedOrigins: unknown = JSON.parse(allowedOriginsText);
+    if (!Array.isArray(parsedOrigins) || parsedOrigins.length === 0 ||
+        !parsedOrigins.every((origin): origin is string => typeof origin === "string" &&
+          origin.length > 0 && origin.trim() === origin)) {
+      return null;
+    }
+    const allowedOrigins = new Set<string>();
+    for (const origin of parsedOrigins) {
+      if (new URL(origin).origin !== origin) return null;
+      allowedOrigins.add(origin);
+    }
+    if (allowedOrigins.size !== parsedOrigins.length) return null;
+
+    return {
+      publicJwk: {kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y},
+      issuer,
+      audience,
+      environment,
+      deployment,
+      allowedOrigins,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function cybernestManagerIdFromConnectionProof(
+    proof: string, config: CybernestConnectionProofConfig): Promise<string | null> {
+  try {
+    const key = await importJWK(config.publicJwk, "ES256");
+    const {payload, protectedHeader} = await jwtVerify(proof, key, {
+      algorithms: ["ES256"],
+      issuer: config.issuer,
+      audience: config.audience,
+    });
+    const claims = Object.keys(payload);
+    if (claims.length !== CYBERNEST_OS_CONNECTION_PROOF_CLAIMS.size ||
+        claims.some(claim => !CYBERNEST_OS_CONNECTION_PROOF_CLAIMS.has(claim)) ||
+        Object.keys(protectedHeader).length !== 2 || protectedHeader.alg !== "ES256" ||
+        protectedHeader.typ !== "cybernest-os-connection+jwt") {
+      return null;
+    }
+
+    const {iss, aud, sub, purpose, environment, deployment, iat, exp} = payload;
+    const now = Math.floor(Date.now() / 1_000);
+    if (iss !== config.issuer || aud !== config.audience ||
+        typeof sub !== "string" || !CYBERNEST_MANAGER_UUID.test(sub) ||
+        purpose !== "os_connection" ||
+        environment !== config.environment || deployment !== config.deployment ||
+        typeof iat !== "number" || !Number.isSafeInteger(iat) ||
+        typeof exp !== "number" || !Number.isSafeInteger(exp) ||
+        iat > now || exp <= now || exp <= iat ||
+        exp - iat > CYBERNEST_OS_CONNECTION_PROOF_LIFETIME_SECONDS) {
+      return null;
+    }
+    return sub;
+  } catch {
+    return null;
+  }
 }
 
 // =======================================================================================
@@ -734,169 +818,123 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
   });
 }
 
-type CybernestManagerLookup =
-    | { _tag: "ready", user: DurableObjectStub<UserDurableObject> }
-    | { _tag: "absent" }
-    | { _tag: "failed" };
-
-async function lookupCybernestManager(
-    ctx: ExecutionContext, managerId: string): Promise<CybernestManagerLookup> {
-  try {
-    const id = ctx.exports.UserDurableObject.idFromName(managerId);
-    const user = ctx.exports.UserDurableObject.get(id);
-    const profile = await user.whoamiIfExists();
-    if (profile === null) return {_tag: "absent"};
-    if (profile.type !== "user" || profile.id !== managerId) return {_tag: "failed"};
-    return {_tag: "ready", user};
-  } catch (error) {
-    logger.warn("failed to look up Cybernest Manager", {
-      event: "manager.lookup_failed",
-      error,
-    });
-    return {_tag: "failed"};
-  }
-}
-
-async function handleCybernestManagerEndpoint(
-    req: Request, ctx: ExecutionContext): Promise<Response> {
-  const managerId = cybernestManagerId(req);
-  if (managerId === null) return new Response(null, {status: 400});
-
-  if (req.method === "GET") {
-    const result = await lookupCybernestManager(ctx, managerId);
-    if (result._tag === "absent") return new Response(null, {status: 404});
-    if (result._tag === "failed") return new Response(null, {status: 503});
-    return new Response(null, {status: 204});
+@validateRpc()
+class CybernestConnectionBootstrapImpl extends RpcTarget implements CybernestConnectionBootstrapApi {
+  constructor(
+      private ctx: ExecutionContext,
+      private env: Env,
+      private proofConfig: CybernestConnectionProofConfig,
+      private closeConnection: () => void) {
+    super();
+    this.#publicApi = new PublicApiImpl(ctx, env, () => {});
   }
 
-  if (req.method === "POST") {
+  #publicApi: PublicApiImpl;
+  #proofAttempted = false;
+
+  getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
+    return this.#publicApi.getBlueprint(id);
+  }
+
+  downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
+    return this.#publicApi.downloadBlueprint(id);
+  }
+
+  async presentProof(proof: string): Promise<AuthenticatedApi> {
+    if (this.#proofAttempted) {
+      throw new Error("This connection has already received a proof.");
+    }
+    this.#proofAttempted = true;
+
+    const managerId = await cybernestManagerIdFromConnectionProof(proof, this.proofConfig);
+    if (managerId === null) {
+      this.closeConnection();
+      throw new Error("Invalid Cybernest OS connection proof.");
+    }
+
     try {
-      const id = ctx.exports.UserDurableObject.idFromName(managerId);
-      const user = ctx.exports.UserDurableObject.get(id);
-      await user.ensureCybernestManager(managerId);
-      const profile = await user.whoamiIfExists();
-      if (profile === null || profile.type !== "user" || profile.id !== managerId) {
-        return new Response(null, {status: 503});
-      }
-      return new Response(null, {status: 204});
+      const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+      await this.ctx.exports.UserDurableObject.get(userId).ensureCybernestManager(managerId);
+      return new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {
+        this.closeConnection();
+      });
     } catch (error) {
-      logger.warn("failed to ensure Cybernest Manager", {
-        event: "manager.ensure_failed",
+      logger.warn("failed to establish Cybernest Manager session", {
+        event: "manager.connection.failed",
         error,
       });
-      return new Response(null, {status: 503});
+      this.closeConnection();
+      throw error;
     }
   }
-
-  return new Response(null, {status: 404});
 }
 
-function waitForPrivateLeaseClose(
-    socket: WebSocket, leaseExpiresAt: number): Promise<void> {
-  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
-
-  return new Promise((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let finished = false;
-    const finish = (): void => {
-      if (finished) return;
-      finished = true;
-      if (timer !== undefined) clearTimeout(timer);
-      socket.removeEventListener("close", finish);
-      resolve();
-    };
-
-    socket.addEventListener("close", finish, {once: true});
-    if (finished) return;
-    timer = setTimeout(() => {
-      try {
-        socket.close(1000, "private manager lease expired");
-      } finally {
-        finish();
-      }
-    }, Math.max(0, leaseExpiresAt - Date.now()));
-  });
-}
-
-function newPrivateNativeWebSocketResponse(
-    localMain: RpcTarget): {response: Response; server: WebSocket} {
+function newCybernestBootstrapWebSocketResponse(
+    ctx: ExecutionContext,
+    env: Env,
+    proofConfig: CybernestConnectionProofConfig): Response {
   const pair = new WebSocketPair();
   const server = pair[0];
   server.accept();
-  newWebSocketRpcSession(server, localMain);
-  return {
-    response: new Response(null, {
-      status: 101,
-      webSocket: pair[1],
-    }),
-    server,
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposeSession = (): void => {};
+  let finished = false;
+  const cleanup = (): void => {
+    if (finished) return;
+    finished = true;
+    if (timer !== undefined) clearTimeout(timer);
+    server.removeEventListener("close", cleanup);
+    disposeSession();
   };
-}
-
-async function handleCybernestPrivateApi(
-  req: Request, env: Env, ctx: ExecutionContext, managerId: string): Promise<Response> {
-  if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-    return new Response(null, {status: 400});
-  }
-
-  const leaseExpiresAt = cybernestPrivateLeaseExpiresAt(req, Date.now());
-  if (leaseExpiresAt === null) {
-    return new Response(null, {status: 503});
-  }
-  const manager = await lookupCybernestManager(ctx, managerId);
-  if (manager._tag !== "ready") {
-    return new Response(null, {status: 503});
-  }
-
-  // Keep the same native Cap'n Web transport and AuthenticatedApi implementation used by the
-  // upstream Workshop. Cybernest supplies the already-owned User DO; it does not duplicate the
-  // public authentication protocol or query the DO's SQLite state.
-  let resp: Response | undefined;
-  let nativeSocket: WebSocket | undefined;
-  let aborted = false;
-  const abortSession = (reason: Error) => {
-    logger.warn("aborting private manager api session", {
-      event: "session.abort",
-      error: reason,
-    });
-    aborted = true;
-    resp?.webSocket?.close();
+  const closeConnection = (): void => {
+    try {
+      cleanup();
+    } finally {
+      if (server.readyState === WebSocket.OPEN) {
+        server.close(1000, "Cybernest connection lifetime ended");
+      }
+    }
   };
+  server.addEventListener("close", cleanup, {once: true});
+  timer = setTimeout(closeConnection, CYBERNEST_OS_CONNECTION_LIFETIME_MS);
 
-  const userId = ctx.exports.UserDurableObject.idFromName(managerId);
-  const nativeApi = new AuthenticatedApiImpl(ctx, env, userId, abortSession);
-  const nativeResponse = newPrivateNativeWebSocketResponse(
-    nativeApi,
-  );
-  nativeSocket = nativeResponse.server;
-  const response = nativeResponse.response;
-  resp = response;
-  if (aborted) {
-    nativeSocket.close();
-    response.webSocket?.close();
-  } else {
-    void waitForPrivateLeaseClose(nativeSocket, leaseExpiresAt);
+  try {
+    const bootstrap = new CybernestConnectionBootstrapImpl(ctx, env, proofConfig, closeConnection);
+    const session = newWebSocketRpcSession(server, bootstrap);
+    disposeSession = () => session[Symbol.dispose]();
+  } catch (error) {
+    closeConnection();
+    throw error;
   }
-  return response;
+
+  return new Response(null, {
+    status: 101,
+    webSocket: pair[1],
+  });
 }
 
 async function handleCybernestPrivateRuntimeRequest(
     req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(req.url);
 
-  if (url.pathname === "/_cybernest/manager") {
-    return handleCybernestManagerEndpoint(req, ctx);
+  if (url.pathname === SITE_LOGO_PATH) return serveSiteLogo(req, env.BLUEPRINT_CONTENT);
+  if (url.pathname.startsWith(BLUEPRINT_SCREENSHOT_PATH_PREFIX)) {
+    return serveBlueprintScreenshot(env, url.pathname.slice(BLUEPRINT_SCREENSHOT_PATH_PREFIX.length));
+  }
+  if (url.pathname === "/api/client-errors") return handleClientErrorRequest(req, env, ctx);
+  if (url.pathname !== "/api") return new Response(null, {status: 404});
+  if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response(null, {status: 400});
   }
 
-  if (url.pathname === "/api") {
-    const managerId = cybernestManagerId(req);
-    if (managerId === null) {
-      return new Response(null, {status: 400});
-    }
-    return handleCybernestPrivateApi(req, env, ctx, managerId);
+  const proofConfig = cybernestConnectionProofConfig(env);
+  if (proofConfig === null) return new Response(null, {status: 503});
+  const origin = req.headers.get("Origin");
+  if (origin === null || !proofConfig.allowedOrigins.has(origin)) {
+    return new Response(null, {status: 403});
   }
-
-  return new Response(null, {status: 404});
+  return newCybernestBootstrapWebSocketResponse(ctx, env, proofConfig);
 }
 
 // Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client redeems the login
