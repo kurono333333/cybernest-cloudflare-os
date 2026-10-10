@@ -902,8 +902,17 @@ function newCybernestBootstrapWebSocketResponse(
       }
     }
   };
+  const expireConnection = (): void => {
+    try {
+      if (server.readyState === WebSocket.OPEN) {
+        server.close(1000, "Cybernest connection lifetime ended");
+      }
+    } finally {
+      cleanup();
+    }
+  };
   server.addEventListener("close", cleanup, {once: true});
-  timer = setTimeout(closeConnection, CYBERNEST_OS_CONNECTION_LIFETIME_MS);
+  timer = setTimeout(expireConnection, CYBERNEST_OS_CONNECTION_LIFETIME_MS);
 
   try {
     const bootstrap = new CybernestConnectionBootstrapImpl(ctx, env, proofConfig, closeConnection);
