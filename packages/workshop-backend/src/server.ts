@@ -112,7 +112,6 @@ type Env = Cloudflare.Env & {
   CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
 }
 
-const CYBERNEST_MANAGER_HEADER = "X-Cybernest-Manager-Id";
 const CYBERNEST_MANAGER_UUID =
     /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|f{8}-f{4}-f{4}-f{4}-f{12})$/u;
 
