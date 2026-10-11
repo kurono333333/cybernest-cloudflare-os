@@ -14,6 +14,7 @@ import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
+import { deleteBlueprintContent } from "./blueprint-archive.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -169,6 +170,47 @@ export type UserChatContext = {
 
 function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
   return g.lastActive !== undefined;
+}
+
+function isValidGadgetRecord(record: unknown): record is GadgetRecord {
+  if (!isRecord(record) || typeof record.id !== "string" || record.id.length === 0 ||
+      typeof record.title !== "string" || !(record.created instanceof Date) ||
+      !Number.isFinite(record.created.getTime())) {
+    return false;
+  }
+  if (record.lastActive !== undefined &&
+      (!(record.lastActive instanceof Date) || !Number.isFinite(record.lastActive.getTime()))) {
+    return false;
+  }
+  if (record.lifecycle !== undefined && record.lifecycle !== "unused" &&
+      record.lifecycle !== "active") {
+    return false;
+  }
+  if (record.owner !== undefined && (!isRecord(record.owner) ||
+      (record.owner.type !== "user" && record.owner.type !== "agent" &&
+        record.owner.type !== "gadget") || typeof record.owner.id !== "string" ||
+      typeof record.owner.name !== "string" || (record.owner.commitEmail !== undefined &&
+        typeof record.owner.commitEmail !== "string"))) {
+    return false;
+  }
+  if (record.role !== undefined && record.role !== "build" && record.role !== "use") return false;
+  if (record.pinned !== undefined && typeof record.pinned !== "boolean") return false;
+  if (record.totalCost !== undefined && (typeof record.totalCost !== "number" ||
+      !Number.isFinite(record.totalCost))) {
+    return false;
+  }
+  if (record.containsRestrictedData !== undefined &&
+      typeof record.containsRestrictedData !== "boolean") {
+    return false;
+  }
+  if (record.ownerInvitesOnly !== undefined && typeof record.ownerInvitesOnly !== "boolean") {
+    return false;
+  }
+  if (record.defaultGadgetId !== undefined &&
+      (typeof record.defaultGadgetId !== "number" || !Number.isSafeInteger(record.defaultGadgetId))) {
+    return false;
+  }
+  return true;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -455,13 +497,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         name: "Manager",
         id: managerId,
       });
-      return;
+    } else {
+      const profile = this.storage.profile.get();
+      if (profile.type !== "user" || profile.id !== managerId) {
+        throw new Error("Cybernest manager profile does not match the User DO identity.");
+      }
     }
-
-    const profile = this.storage.profile.get();
-    if (profile.type !== "user" || profile.id !== managerId) {
-      throw new Error("Cybernest manager profile does not match the User DO identity.");
-    }
+    this.#syncDirectory();
   }
 
   #validateManagerKnowledgeRecord(value: unknown, slotId: number): ConnectedAccountRecord {
@@ -755,7 +797,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // capnweb-validate lets through properties that RedactedAiModelConfig omits, and these are a
     // deployment's to set on its own models.
-    let {reasoning, compactionInputBudget, behavesLike, ...own} = config;
+    let {reasoning, compactionInputBudget, behavesLike, capabilities, ...own} = config;
 
     profile.type = "agent";
     this.storage.aiModels.put({profile, config: own});
@@ -987,6 +1029,43 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const ownedCount = Array.from(this.storage.gadgets.list())
       .filter(gadget => gadget.owner === undefined)
       .length;
+    this.#writeNewGadgetRecord(id, title, ownedCount);
+  }
+
+  defaultWorkspace(mode: "prepare" | "observe"): string | null {
+    return this.storage.transaction(() => {
+      let records: GadgetRecord[];
+      try {
+        records = Array.from(this.storage.gadgets.list());
+      } catch (error) {
+        logger.warn("Could not read native workspace metadata for default workspace.", {
+          event: "workspace.default.metadata.read.failed",
+          error,
+        });
+        return null;
+      }
+      if (!records.every(isValidGadgetRecord)) return null;
+      for (const {id} of records) {
+        try {
+          this.ctx.exports.OverseerDurableObject.idFromString(id);
+        } catch (error) {
+          if (error instanceof TypeError) return null;
+          throw error;
+        }
+      }
+
+      const owned = records.filter((gadget) => gadget.owner === undefined);
+      if (owned.some((gadget) => !isFullyCreated(gadget))) return null;
+      if (owned.length === 1) return owned[0]!.id;
+      if (owned.length > 1 || mode === "observe") return null;
+
+      const id = this.ctx.exports.OverseerDurableObject.newUniqueId().toString();
+      this.#writeNewGadgetRecord(id, "Untitled Workspace", owned.length);
+      return id;
+    });
+  }
+
+  #writeNewGadgetRecord(id: string, title: string, ownedCount: number): void {
     if (ownedCount >= MAX_WORKSPACES_PER_USER) {
       throw new Error("Workspace limit reached.");
     }
@@ -1235,9 +1314,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
 
       // Delete all R2 objects with the blueprint ID prefix.
-      for (let v = 1; v <= kvRecord.metadata.version; v++) {
-        await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
-      }
+      await deleteBlueprintContent(this.env, id);
       await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
 
       // Delete from KV.

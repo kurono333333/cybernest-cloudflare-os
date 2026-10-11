@@ -58,7 +58,7 @@ async function connect(): Promise<RpcStub<PublicApi>> {
   // Invoke the handler directly so the WebSocket session shares the test's execution context.
   const response = await server.fetch(new Request("https://workshop.invalid/api", {
     headers: { Upgrade: "websocket" },
-  }), env, createExecutionContext());
+  }), { ...env, CYBERNEST_PRIVATE_MANAGER_RUNTIME: "false" }, createExecutionContext());
 
   expect(response.status).toBe(101);
   const socket = response.webSocket;

@@ -56,6 +56,15 @@ declare global {
       // Existing private Manager runtime switch used by owner-only Workspace behavior.
       CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
 
+      // Connection proofs for the private Cybernest OS bootstrap. The JWK contains only the
+      // verification key; these values are deployment configuration, not per-request input.
+      CYBERNEST_OS_PROOF_PUBLIC_JWK?: string;
+      CYBERNEST_OS_PROOF_ISSUER?: string;
+      CYBERNEST_OS_PROOF_AUDIENCE?: string;
+      CYBERNEST_OS_PROOF_ENVIRONMENT?: string;
+      CYBERNEST_OS_PROOF_DEPLOYMENT?: string;
+      CYBERNEST_OS_ALLOWED_ORIGINS?: string;
+
       // ---------------------------------------------------------------------------------------------
       // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier
       // limits / top-up). All OFF by default; existing password / Cloudflare Access deployments are

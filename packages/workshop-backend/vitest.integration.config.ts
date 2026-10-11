@@ -1,7 +1,23 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { exportJWK, generateKeyPair } from "jose";
 import capnwebValidate from "capnweb-validate/vite";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
+
+declare module "vitest" {
+  interface ProvidedContext {
+    cybernestOsTestPrivateJwk: string;
+  }
+}
+
+const {privateKey, publicKey} = await generateKeyPair("ES256", {extractable: true});
+const privateJwk = JSON.stringify(await exportJWK(privateKey));
+const publicJwk = JSON.stringify(await exportJWK(publicKey));
+const proofIssuer = "https://proof-issuer.test.invalid";
+const proofAudience = "cybernest-os-integration-test";
+const proofEnvironment = "test";
+const proofDeployment = "cybernest-os-integration";
+const allowedOrigin = "https://workshop.invalid";
 
 const EXPECTED_RPC_ERROR_CODES = new Set([
   "WORKSPACE_NOT_FOUND",
@@ -34,16 +50,20 @@ export default defineConfig({
       },
       miniflare: {
         serviceBindings: {
-          MANAGER_NATIVE_REGRESSION: {
-            name: kCurrentWorker,
-            entrypoint: "ManagerNativeRegressionEntrypoint",
-          },
           GATEKEEPER_CUSTOM: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeTestVendor" },
           MANAGER_KNOWLEDGE_BRIDGE: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeBridge" },
           MANAGER_KNOWLEDGE_CAPABILITY_FACTORY: {
             name: kCurrentWorker,
             entrypoint: "ManagerKnowledgeTestCapabilityFactory",
           },
+        },
+        bindings: {
+          CYBERNEST_OS_PROOF_PUBLIC_JWK: publicJwk,
+          CYBERNEST_OS_PROOF_ISSUER: proofIssuer,
+          CYBERNEST_OS_PROOF_AUDIENCE: proofAudience,
+          CYBERNEST_OS_PROOF_ENVIRONMENT: proofEnvironment,
+          CYBERNEST_OS_PROOF_DEPLOYMENT: proofDeployment,
+          CYBERNEST_OS_ALLOWED_ORIGINS: JSON.stringify([allowedOrigin]),
         },
       },
     }),
@@ -57,6 +77,7 @@ export default defineConfig({
     // test in the file finishes in tens of milliseconds. The timeout has to clear that cold
     // start, not the steady-state cost, or the first test fails wherever the runner is slow.
     testTimeout: 60_000,
+    provide: {cybernestOsTestPrivateJwk: privateJwk},
     // A rejected future capability is reported independently from the awaited pipelined call.
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {

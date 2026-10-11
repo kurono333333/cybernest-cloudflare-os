@@ -8,7 +8,7 @@ import server from "../src/server";
 async function connect(): Promise<RpcStub<PublicApi>> {
   const response = await server.fetch(new Request("https://workshop.invalid/api", {
     headers: { Upgrade: "websocket" },
-  }), env, createExecutionContext());
+  }), { ...env, CYBERNEST_PRIVATE_MANAGER_RUNTIME: "false" }, createExecutionContext());
   expect(response.status).toBe(101);
   const socket = response.webSocket;
   if (!socket) throw new TypeError("Expected a WebSocket response.");
