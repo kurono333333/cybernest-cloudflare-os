@@ -92,29 +92,6 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
   }
 }
 
-/**
- * Test-only native regression entrypoint. It is intentionally not mounted as an HTTP route and is
- * only bound by the Core manager-runtime integration harness. The product Manager WebSocket above
- * exposes the native AuthenticatedApi instead.
- */
-@validateRpc()
-export class ManagerNativeRegressionEntrypoint extends WorkerEntrypoint<Env> {
-  async fetch(req: Request): Promise<Response> {
-    if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response(null, {status: 400});
-    }
-
-    const managerId = req.headers.get(CYBERNEST_MANAGER_HEADER);
-    if (managerId === null || !CYBERNEST_MANAGER_UUID.test(managerId)) {
-      return new Response(null, {status: 400});
-    }
-
-    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
-    const nativeApi = new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {});
-    return newWorkersRpcResponse(req, nativeApi);
-  }
-}
-
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
     CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,

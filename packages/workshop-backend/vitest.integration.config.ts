@@ -50,10 +50,6 @@ export default defineConfig({
       },
       miniflare: {
         serviceBindings: {
-          MANAGER_NATIVE_REGRESSION: {
-            name: kCurrentWorker,
-            entrypoint: "ManagerNativeRegressionEntrypoint",
-          },
           GATEKEEPER_CUSTOM: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeTestVendor" },
           MANAGER_KNOWLEDGE_BRIDGE: { name: kCurrentWorker, entrypoint: "ManagerKnowledgeBridge" },
           MANAGER_KNOWLEDGE_CAPABILITY_FACTORY: {
