@@ -254,14 +254,15 @@ test("no config names a resource belonging to another deployment", () => {
   }
 });
 
-test("the backend is told the router's origin, and nothing else", () => {
+test("the backend preview keeps its runtime flag and receives the router's origin", () => {
   const { configs } = buildAll();
   const vars = previewsOf(configs, "workshop-backend").vars;
   assert.ok(vars, "the backend preview declares no vars");
 
-  // The origin is the only value the backend needs that is safe to write into a config Wrangler
-  // will print; its admins and Access pair are uploaded as secrets instead (below).
-  assert.deepEqual(Object.keys(vars), ["PUBLIC_BASE_URL"]);
+  // The router origin and existing non-secret Manager runtime flag are safe to write into a
+  // config Wrangler will print; its admins and Access pair are uploaded as secrets instead (below).
+  assert.deepEqual(Object.keys(vars), ["CYBERNEST_PRIVATE_MANAGER_RUNTIME", "PUBLIC_BASE_URL"]);
+  assert.equal(vars.CYBERNEST_PRIVATE_MANAGER_RUNTIME, "true");
   assert.equal(vars.PUBLIC_BASE_URL, BASE_URL);
   // Setting CF_ACCESS_AUD closes the password path on its own — login() and createAccount() both
   // throw once it is set — so this stays unset.
