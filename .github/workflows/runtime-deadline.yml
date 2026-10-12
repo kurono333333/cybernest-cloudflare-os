@@ -1,0 +1,41 @@
+name: Runtime deadline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24.19.0"
+
+jobs:
+  one-hour-runtime:
+    name: One-hour native socket deadline
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and dependencies
+        uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: true
+
+      - name: Build
+        run: pnpm build
+
+      - name: Run one-hour runtime test
+        run: >-
+          pnpm --filter @gadgets/workshop-backend exec vitest run
+          --config vitest.integration.config.ts
+          --testNamePattern="closes guest and authenticated native sockets at the accept-based one-hour deadline$"
+          --maxWorkers=1
