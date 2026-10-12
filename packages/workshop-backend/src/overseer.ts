@@ -11748,12 +11748,6 @@ class OverseerClientInterface extends RpcTarget
       throw new Error("This Manager runtime is private and cannot be shared.");
     }
 
-    if (this.impl.storage.containsRestrictedData.get()) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
-          "shared.");
-    }
-
     return (await this.impl.getSharingManager())
         .createShareLink({ caller: this.#sharingCaller(), role, note });
   }
@@ -11761,12 +11755,6 @@ class OverseerClientInterface extends RpcTarget
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
     if (this.impl.isCybernestPrivateRuntime()) {
       throw new Error("This Manager runtime is private and cannot be shared.");
-    }
-
-    if (this.impl.storage.containsRestrictedData.get()) {
-      throw new Error(
-          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
-          "shared.");
     }
 
     return (await this.impl.getSharingManager())

@@ -1026,6 +1026,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async newGadget(id: string, title: string): Promise<void> {
+    if (this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME !== "true") {
+      // The standard runtime keeps newly opened workspaces provisional until activity begins.
+      return this.newProvisionalGadget(id, title);
+    }
+
     const ownedCount = Array.from(this.storage.gadgets.list())
       .filter(gadget => gadget.owner === undefined)
       .length;
