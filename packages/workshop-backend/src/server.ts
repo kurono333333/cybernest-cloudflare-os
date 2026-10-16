@@ -21,7 +21,8 @@ import { getGatewayModels } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { blueprintContentKey, buildBlueprintArchiveStream, sanitizeBlueprintOutput, parseBlueprintArchive, randomBlueprintId } from "./blueprint-archive.js";
 import { BlueprintKvRecord, listFeaturedBlueprintsFromKv, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
-import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
+import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject,
+  CLOUDFLARE_VENDOR_ID, type ManagerKnowledgePreflightResult } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
@@ -65,8 +66,24 @@ export { UserDurableObject, GatekeeperConnectCallbackImpl };
 // Private Manager-scoped capability view. The bridge only needs the installation check; the
 // User DO and the custom account keep the rest of the capability opaque and forward it unchanged.
 interface ManagerKnowledgeCapability extends WorkerEntrypoint {
-  assertBoundTo(managerId: string): Promise<void>;
+  assertBoundTo(managerId: string): Promise<"cybernest-knowledge-read-v1">;
 }
+
+interface ManagerKnowledgeBronzeWriter extends WorkerEntrypoint {
+  assertBoundTo(managerId: string):
+      | "cybernest-knowledge-bronze-write-v1"
+      | Promise<"cybernest-knowledge-bronze-write-v1">;
+  apply(input: unknown): Promise<unknown>;
+  cancel(input: unknown): Promise<unknown>;
+}
+
+type ManagerKnowledgeSourceReaderProps = Readonly<{ managerId: string }>;
+type ManagerKnowledgeSourceReaderCapability = WorkerEntrypoint & Readonly<{
+  assertBoundTo(managerId: string):
+      | "cybernest-knowledge-source-read-v1"
+      | Promise<"cybernest-knowledge-source-read-v1">;
+  verifySource(input: unknown): Promise<unknown>;
+}>;
 
 /**
  * Native RPC entrypoint used by Core to install a Manager-bound Knowledge account in the OS.
@@ -75,20 +92,92 @@ interface ManagerKnowledgeCapability extends WorkerEntrypoint {
  */
 @validateRpc()
 export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
+  async inspectManagerKnowledge(managerId: string): Promise<ManagerKnowledgePreflightResult> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
+      return { ok: false, code: "permission_denied" };
+    }
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    return user.inspectManagerKnowledge(managerId);
+  }
+
   async ensureManagerKnowledge(
     managerId: string,
-    capability: ManagerKnowledgeCapability,
+    capability: Fetcher<ManagerKnowledgeCapability>,
   ): Promise<void> {
     if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
       throw new TypeError("Manager ID must be a UUID.");
     }
 
-    await capability.assertBoundTo(managerId);
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok) {
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    }
+    if (preflight.value.managerId !== managerId) {
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    }
+    if (preflight.value.accountState === "bound") return;
+    if (preflight.value.accountState === "legacy" ||
+        preflight.value.accountState === "incompatible") {
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    }
+
+    const contract = await capability.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-read-v1") {
+      throw new Error("Manager Knowledge integrity_failure: incompatible reader contract.");
+    }
+    await user.ensureKnowledgeAccount(capability);
+  }
+
+  async ensureManagerKnowledgeBronzeRoles(
+    managerId: string,
+    writer: Fetcher<ManagerKnowledgeBronzeWriter>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await writer.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-bronze-write-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Bronze writer contract.");
 
     const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
     const user = this.ctx.exports.UserDurableObject.get(userId);
-    await user.ensureCybernestManager(managerId);
-    await user.ensureKnowledgeAccount(capability);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    if (preflight.value.bronzeRoles.writer === "incompatible" ||
+        preflight.value.bronzeRoles.sourceReader === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Bronze role slot.");
+
+    await user.ensureManagerKnowledgeBronzeRoles(writer);
+  }
+}
+
+/** Owner-bound metadata reader kept in a separate native capability slot from the writer. */
+@validateRpc()
+export class ManagerKnowledgeSourceReader
+  extends WorkerEntrypoint<Env, ManagerKnowledgeSourceReaderProps> {
+  async assertBoundTo(managerId: string): Promise<"cybernest-knowledge-source-read-v1"> {
+    const props = this.ctx.props;
+    if (!CYBERNEST_MANAGER_UUID.test(props.managerId) || props.managerId !== managerId)
+      throw new TypeError("Knowledge source reader is bound to another Manager.");
+    return "cybernest-knowledge-source-read-v1";
+  }
+
+  async verifySource(input: unknown): Promise<unknown> {
+    const { managerId } = this.ctx.props;
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Knowledge source reader requires a Manager binding.");
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    return this.ctx.exports.UserDurableObject.get(userId)
+      .verifyManagerKnowledgeSource(managerId, input);
   }
 }
 
@@ -836,7 +925,8 @@ class CybernestConnectionBootstrapImpl extends RpcTarget implements CybernestCon
 
     try {
       const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
-      await this.ctx.exports.UserDurableObject.get(userId).ensureCybernestManager(managerId);
+      await this.ctx.exports.UserDurableObject.get(userId)
+          .ensureCybernestManager(managerId, true);
       return new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {
         this.closeConnection();
       });

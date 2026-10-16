@@ -4,6 +4,7 @@ import type {
   GatekeeperUser,
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { ManagerKnowledgeBridge as ManagerKnowledgeBridgeImpl } from "../src/server.js";
 
 export { default } from "../src/server.js";
 export * from "../src/server.js";
@@ -15,9 +16,7 @@ export {
   UserDurableObject,
 } from "../src/server.js";
 
-type ManagerKnowledgeCapability = {
-  assertBoundTo(managerId: string): Promise<void>;
-};
+export type ManagerKnowledgeCapability = Fetcher<ManagerKnowledgeTestCapability>;
 
 type TestAccountProps = {
   capability: ManagerKnowledgeCapability;
@@ -27,14 +26,15 @@ export let managerKnowledgeAccountCreations = 0;
 
 export class ManagerKnowledgeTestCapability
   extends WorkerEntrypoint<Cloudflare.Env, { managerId: string }> {
-  async assertBoundTo(managerId: string): Promise<void> {
+  async assertBoundTo(managerId: string): Promise<"cybernest-knowledge-read-v1"> {
     if (this.ctx.props.managerId !== managerId) {
       throw new Error("Test capability is bound to a different Manager.");
     }
+    return "cybernest-knowledge-read-v1";
   }
 }
 
-export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint {
+export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint<Cloudflare.Env> {
   async resetAccountCreations(): Promise<void> {
     managerKnowledgeAccountCreations = 0;
   }
@@ -43,30 +43,26 @@ export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint {
     return managerKnowledgeAccountCreations;
   }
 
+  async captureBridgeEnsure(
+    managerId: string,
+  ): Promise<string | null> {
+    const capability = await this.create(managerId);
+    try {
+      const bridge = new ManagerKnowledgeBridgeImpl(this.ctx, this.env);
+      await bridge.ensureManagerKnowledge(managerId, capability);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async create(managerId: string): Promise<ManagerKnowledgeCapability> {
-    let workerExports = this.ctx.exports as unknown as {
+    let workerExports = this.ctx.exports as Cloudflare.Exports & {
       ManagerKnowledgeTestCapability(input: { props: { managerId: string } }): ManagerKnowledgeCapability;
     };
     return workerExports.ManagerKnowledgeTestCapability({ props: { managerId } });
   }
 
-  async ensureDuplicate(managerId: string): Promise<boolean> {
-    let capability = await this.create(managerId);
-    let bridge = (this.env as unknown as {
-      MANAGER_KNOWLEDGE_BRIDGE: {
-        ensureManagerKnowledge(
-          id: string,
-          access: ManagerKnowledgeCapability,
-        ): Promise<void>;
-      };
-    }).MANAGER_KNOWLEDGE_BRIDGE;
-    try {
-      await bridge.ensureManagerKnowledge(managerId, capability);
-      return false;
-    } catch (error) {
-      return error instanceof Error && error.message.includes("duplicate connected account");
-    }
-  }
 }
 
 export class ManagerKnowledgeTestVendor extends WorkerEntrypoint {
@@ -111,14 +107,16 @@ export class ManagerKnowledgeTestAccount
   async describe(): Promise<AccountDescription> {
     return {
       displayName: "Knowledge Base",
-      url: "knowledge://current",
+      avatar: { url: "" },
       singleton: { tsType: "KnowledgeBase" },
     };
   }
 
-  async inspectManagerBinding(managerId: string): Promise<"legacy" | "bound"> {
-    await this.ctx.props.capability.assertBoundTo(managerId);
-    return "bound";
+  async inspectManagerBinding(
+    managerId: string,
+  ): Promise<"legacy" | "bound" | "incompatible"> {
+    const contract = await this.ctx.props.capability.assertBoundTo(managerId);
+    return contract === "cybernest-knowledge-read-v1" ? "bound" : "incompatible";
   }
 
   async revoke(): Promise<void> {}
@@ -128,7 +126,7 @@ export class ManagerKnowledgeTestLegacyAccount extends WorkerEntrypoint {
   async describe(): Promise<AccountDescription> {
     return {
       displayName: "Custom Gatekeeper",
-      url: "custom://deployment-info",
+      avatar: { url: "" },
       singleton: { tsType: "CustomSession" },
     };
   }
