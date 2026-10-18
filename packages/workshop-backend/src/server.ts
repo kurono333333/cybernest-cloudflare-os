@@ -71,8 +71,9 @@ interface ManagerKnowledgeCapability extends WorkerEntrypoint {
 
 interface ManagerKnowledgeBronzeWriter extends WorkerEntrypoint {
   assertBoundTo(managerId: string):
-      | "cybernest-knowledge-bronze-write-v1"
-      | Promise<"cybernest-knowledge-bronze-write-v1">;
+      | "cybernest-knowledge-bronze-write-v2"
+      | Promise<"cybernest-knowledge-bronze-write-v2">;
+  validateCandidate(input: unknown): Promise<unknown>;
   apply(input: unknown): Promise<unknown>;
   cancel(input: unknown): Promise<unknown>;
 }
@@ -140,7 +141,7 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
       throw new TypeError("Manager ID must be a UUID.");
 
     const contract = await writer.assertBoundTo(managerId);
-    if (contract !== "cybernest-knowledge-bronze-write-v1")
+    if (contract !== "cybernest-knowledge-bronze-write-v2")
       throw new Error("Manager Knowledge integrity_failure: incompatible Bronze writer contract.");
 
     const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);

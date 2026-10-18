@@ -95,7 +95,10 @@ type ManagerKnowledgeAccountStub = {
 };
 
 type ManagerKnowledgeBronzeWriter = {
-  assertBoundTo(managerId: string): string | Promise<string>;
+  assertBoundTo(managerId: string):
+    | "cybernest-knowledge-bronze-write-v2"
+    | Promise<"cybernest-knowledge-bronze-write-v2">;
+  validateCandidate(input: unknown): Promise<unknown>;
   apply(input: unknown): Promise<unknown>;
   cancel(input: unknown): Promise<unknown>;
 };
@@ -848,7 +851,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
     const managerId = profile.id;
     this.#requireManagerKnowledgePreflight(managerId);
-    if (await writer.assertBoundTo(managerId) !== "cybernest-knowledge-bronze-write-v1")
+    if (await writer.assertBoundTo(managerId) !== "cybernest-knowledge-bronze-write-v2")
       throw new Error("Manager Knowledge integrity_failure: incompatible Bronze writer contract.");
 
     const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
