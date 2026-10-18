@@ -78,6 +78,14 @@ interface ManagerKnowledgeBronzeWriter extends WorkerEntrypoint {
   cancel(input: unknown): Promise<unknown>;
 }
 
+interface ManagerKnowledgeGoldController extends WorkerEntrypoint {
+  assertBoundTo(managerId: string):
+      | "cybernest-knowledge-gold-job-control-v1"
+      | Promise<"cybernest-knowledge-gold-job-control-v1">;
+  inspect(): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
+}
+
 type ManagerKnowledgeSourceReaderProps = Readonly<{ managerId: string }>;
 type ManagerKnowledgeSourceReaderCapability = WorkerEntrypoint & Readonly<{
   assertBoundTo(managerId: string):
@@ -158,6 +166,30 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
       throw new Error("Manager Knowledge integrity_failure: incompatible Bronze role slot.");
 
     await user.ensureManagerKnowledgeBronzeRoles(writer);
+  }
+
+  /** Installs the private Gold callback only after the canonical User and Account preflight. */
+  async ensureManagerKnowledgeGoldRoles(
+    managerId: string,
+    controller: Fetcher<ManagerKnowledgeGoldController>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await controller.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-gold-job-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    await user.ensureManagerKnowledgeGoldRoles(controller);
   }
 }
 

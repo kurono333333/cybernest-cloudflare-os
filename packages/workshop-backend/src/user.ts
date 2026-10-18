@@ -92,6 +92,8 @@ type ManagerKnowledgeAccountStub = {
     writer: ManagerKnowledgeBronzeWriter,
     sourceReader: ManagerKnowledgeSourceReader,
   ): Promise<void>;
+  inspectGoldRole(managerId: string): Promise<"absent" | "installed" | "incompatible">;
+  installGoldRole(managerId: string, controller: ManagerKnowledgeGoldController): Promise<void>;
 };
 
 type ManagerKnowledgeBronzeWriter = {
@@ -106,6 +108,14 @@ type ManagerKnowledgeBronzeWriter = {
 type ManagerKnowledgeSourceReader = {
   assertBoundTo(managerId: string): string | Promise<string>;
   verifySource(input: unknown): Promise<unknown>;
+};
+
+type ManagerKnowledgeGoldController = {
+  assertBoundTo(managerId: string):
+    | "cybernest-knowledge-gold-job-control-v1"
+    | Promise<"cybernest-knowledge-gold-job-control-v1">;
+  inspect(): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
 };
 
 type ManagerKnowledgeSourceSelector =
@@ -342,6 +352,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   #knowledgeEnsurePromise?: Promise<void>;
   #knowledgeBronzeEnsurePromise?: Promise<void>;
+  #knowledgeGoldEnsurePromise?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -875,6 +886,48 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       .inspectBronzeRoles(managerId);
     if (roles.writer !== "installed" || roles.sourceReader !== "installed")
       throw new Error("Manager Knowledge dependency_unavailable: Bronze role install incomplete.");
+  }
+
+  ensureManagerKnowledgeGoldRoles(controller: ManagerKnowledgeGoldController): Promise<void> {
+    return (this.#knowledgeGoldEnsurePromise ??=
+      this.#ensureManagerKnowledgeGoldRoles(controller).finally(() => {
+        this.#knowledgeGoldEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureManagerKnowledgeGoldRoles(
+    controller: ManagerKnowledgeGoldController,
+  ): Promise<void> {
+    if (!this.storage.created.get())
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || typeof profile.id !== "string" ||
+        !CYBERNEST_MANAGER_UUID.test(profile.id))
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    const managerId = profile.id;
+    this.#requireManagerKnowledgePreflight(managerId);
+    if (await controller.assertBoundTo(managerId) !== "cybernest-knowledge-gold-job-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const account = slots[0];
+    if (account?.kind !== "bound")
+      throw new Error("Manager Knowledge dependency_unavailable: read account is not bound.");
+
+    const accountStub = account.record.account as unknown as ManagerKnowledgeAccountStub;
+    const current = await accountStub.inspectGoldRole(managerId);
+    if (current === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold role slot.");
+    if (current === "absent") {
+      this.#requireManagerKnowledgePreflight(managerId);
+      await accountStub.installGoldRole(managerId, controller);
+      this.#requireManagerKnowledgePreflight(managerId);
+    }
+
+    const installed = await accountStub.inspectGoldRole(managerId);
+    if (installed !== "installed")
+      throw new Error("Manager Knowledge dependency_unavailable: Gold role install incomplete.");
   }
 
   /**
