@@ -94,6 +94,11 @@ type ManagerKnowledgeAccountStub = {
   ): Promise<void>;
   inspectGoldRole(managerId: string): Promise<"absent" | "installed" | "incompatible">;
   installGoldRole(managerId: string, controller: ManagerKnowledgeGoldController): Promise<void>;
+  inspectGoldPageRole(managerId: string): Promise<"absent" | "installed" | "incompatible">;
+  installGoldPageRole(
+    managerId: string,
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void>;
 };
 
 type ManagerKnowledgeBronzeWriter = {
@@ -117,6 +122,17 @@ type ManagerKnowledgeGoldController = {
   inspect(): Promise<unknown>;
   apply(input: unknown): Promise<unknown>;
 };
+
+type ManagerKnowledgeGoldPageController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): "cybernest-knowledge-gold-page-control-v1" |
+      Promise<"cybernest-knowledge-gold-page-control-v1">;
+  inspectPage(input: unknown): Promise<unknown>;
+  admitPageAction(input: unknown): Promise<unknown>;
+  editPage(input: unknown): Promise<unknown>;
+  requestProtectionReleaseAndCleanReplacement(input: unknown): Promise<unknown>;
+}>;
 
 type ManagerKnowledgeSourceSelector =
   | Readonly<{ kind: "chat_message"; chatId: number; sequence: number }>
@@ -353,6 +369,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   #knowledgeEnsurePromise?: Promise<void>;
   #knowledgeBronzeEnsurePromise?: Promise<void>;
   #knowledgeGoldEnsurePromise?: Promise<void>;
+  #knowledgeGoldPageEnsurePromise?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -928,6 +945,69 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const installed = await accountStub.inspectGoldRole(managerId);
     if (installed !== "installed")
       throw new Error("Manager Knowledge dependency_unavailable: Gold role install incomplete.");
+  }
+
+  ensureManagerKnowledgeGoldPageRoles(
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void> {
+    return (this.#knowledgeGoldPageEnsurePromise ??=
+      this.#ensureManagerKnowledgeGoldPageRoles(controller).finally(() => {
+        this.#knowledgeGoldPageEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureManagerKnowledgeGoldPageRoles(
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void> {
+    if (!this.storage.created.get())
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || typeof profile.id !== "string" ||
+        !CYBERNEST_MANAGER_UUID.test(profile.id))
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    const managerId = profile.id;
+    this.#requireManagerKnowledgePreflight(managerId);
+    if (await controller.assertBoundTo(managerId) !==
+        "cybernest-knowledge-gold-page-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const account = slots[0];
+    if (account?.kind !== "bound")
+      throw new Error("Manager Knowledge dependency_unavailable: read account is not bound.");
+
+    const accountStub = account.record.account as unknown as ManagerKnowledgeAccountStub;
+    const current = await accountStub.inspectGoldPageRole(managerId);
+    if (current === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold page-role slot.");
+    if (current === "absent") {
+      this.#requireManagerKnowledgePreflight(managerId);
+      const installSlots = await this.#readManagerKnowledgeAccountSlots(managerId);
+      this.#requireManagerKnowledgePreflight(managerId);
+      const installAccount = installSlots[0];
+      if (installAccount?.kind !== "bound" ||
+          installAccount.record.id !== account.record.id)
+        throw new Error("Manager Knowledge dependency_unavailable: read account changed.");
+      const installAccountStub =
+        installAccount.record.account as unknown as ManagerKnowledgeAccountStub;
+      if (await controller.assertBoundTo(managerId) !==
+          "cybernest-knowledge-gold-page-control-v1")
+        throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+      await installAccountStub.installGoldPageRole(managerId, controller);
+      this.#requireManagerKnowledgePreflight(managerId);
+    }
+
+    const readbackSlots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const readbackAccount = readbackSlots[0];
+    if (readbackAccount?.kind !== "bound" ||
+        readbackAccount.record.id !== account.record.id)
+      throw new Error("Manager Knowledge dependency_unavailable: read account changed.");
+    const installed = await (readbackAccount.record.account as unknown as ManagerKnowledgeAccountStub)
+      .inspectGoldPageRole(managerId);
+    if (installed !== "installed")
+      throw new Error("Manager Knowledge dependency_unavailable: Gold page-role install incomplete.");
   }
 
   /**

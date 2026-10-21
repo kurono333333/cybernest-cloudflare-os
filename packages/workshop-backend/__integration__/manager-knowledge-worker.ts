@@ -6,6 +6,20 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { ManagerKnowledgeBridge as ManagerKnowledgeBridgeImpl } from "../src/server.js";
 
+export const GOLD_CONTROL_CONTRACT = "cybernest-knowledge-gold-job-control-v1" as const;
+export const GOLD_PAGE_CONTROL_CONTRACT = "cybernest-knowledge-gold-page-control-v1" as const;
+
+type GoldJobRoleController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): typeof GOLD_CONTROL_CONTRACT | Promise<typeof GOLD_CONTROL_CONTRACT>;
+}>;
+type GoldPageRoleController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): typeof GOLD_PAGE_CONTROL_CONTRACT | Promise<typeof GOLD_PAGE_CONTROL_CONTRACT>;
+}>;
+
 export { default } from "../src/server.js";
 export * from "../src/server.js";
 // Vitest's ctx.exports analyzer does not follow the production barrel re-export for entrypoints.
@@ -17,6 +31,27 @@ export {
 } from "../src/server.js";
 
 export type ManagerKnowledgeCapability = Fetcher<ManagerKnowledgeTestCapability>;
+type ManagerKnowledgeTestGoldRoleState = {
+  goldJobRole: "absent" | "installed";
+  goldPageRole: "absent" | "installed";
+  pageSlotEvents: string[];
+  jobSlotEvents: string[];
+};
+
+const managerKnowledgeGoldRoleStates = new Map<string, ManagerKnowledgeTestGoldRoleState>();
+const managerKnowledgeGoldRoleState = (managerId: string): ManagerKnowledgeTestGoldRoleState => {
+  let state = managerKnowledgeGoldRoleStates.get(managerId);
+  if (!state) {
+    state = {
+      goldJobRole: "absent",
+      goldPageRole: "absent",
+      pageSlotEvents: [],
+      jobSlotEvents: [],
+    };
+    managerKnowledgeGoldRoleStates.set(managerId, state);
+  }
+  return state;
+};
 
 type TestAccountProps = {
   capability: ManagerKnowledgeCapability;
@@ -41,6 +76,15 @@ export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint<Clou
 
   async readAccountCreations(): Promise<number> {
     return managerKnowledgeAccountCreations;
+  }
+
+  async readGoldRoleStateForTest(managerId: string): Promise<ManagerKnowledgeTestGoldRoleState> {
+    const state = managerKnowledgeGoldRoleState(managerId);
+    return {
+      ...state,
+      pageSlotEvents: [...state.pageSlotEvents],
+      jobSlotEvents: [...state.jobSlotEvents],
+    };
   }
 
   async captureBridgeEnsure(
@@ -119,7 +163,64 @@ export class ManagerKnowledgeTestAccount
     return contract === "cybernest-knowledge-read-v1" ? "bound" : "incompatible";
   }
 
+  async inspectBronzeRoles(managerId: string): Promise<{
+    writer: "absent";
+    sourceReader: "absent";
+  }> {
+    await this.#assertManager(managerId);
+    return { writer: "absent", sourceReader: "absent" };
+  }
+
+  async inspectGoldRole(managerId: string): Promise<"absent" | "installed" | "incompatible"> {
+    await this.#assertManager(managerId);
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.jobSlotEvents.push("inspect:" + managerId);
+    return state.goldJobRole;
+  }
+
+  async installGoldRole(
+    managerId: string,
+    controller: GoldJobRoleController,
+  ): Promise<void> {
+    await this.#assertManager(managerId);
+    if (await controller.assertBoundTo(managerId) !== GOLD_CONTROL_CONTRACT) {
+      throw new Error("Incompatible Gold job controller contract.");
+    }
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.jobSlotEvents.push("install:" + managerId);
+    state.goldJobRole = "installed";
+  }
+
+  async inspectGoldPageRole(
+    managerId: string,
+  ): Promise<"absent" | "installed" | "incompatible"> {
+    await this.#assertManager(managerId);
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.pageSlotEvents.push("inspect:" + managerId);
+    return state.goldPageRole;
+  }
+
+  async installGoldPageRole(
+    managerId: string,
+    controller: GoldPageRoleController,
+  ): Promise<void> {
+    await this.#assertManager(managerId);
+    if (await controller.assertBoundTo(managerId) !== GOLD_PAGE_CONTROL_CONTRACT) {
+      throw new Error("Incompatible Gold page controller contract.");
+    }
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.pageSlotEvents.push("install:" + managerId);
+    state.goldPageRole = "installed";
+  }
+
   async revoke(): Promise<void> {}
+
+  async #assertManager(managerId: string): Promise<void> {
+    if (await this.ctx.props.capability.assertBoundTo(managerId) !==
+        "cybernest-knowledge-read-v1") {
+      throw new Error("Test Knowledge account is bound to another Manager.");
+    }
+  }
 }
 
 export class ManagerKnowledgeTestLegacyAccount extends WorkerEntrypoint {

@@ -86,6 +86,9 @@ interface ManagerKnowledgeGoldController extends WorkerEntrypoint {
   apply(input: unknown): Promise<unknown>;
 }
 
+type ManagerKnowledgeGoldPageController = WorkerEntrypoint &
+    Parameters<UserDurableObject["ensureManagerKnowledgeGoldPageRoles"]>[0];
+
 type ManagerKnowledgeSourceReaderProps = Readonly<{ managerId: string }>;
 type ManagerKnowledgeSourceReaderCapability = WorkerEntrypoint & Readonly<{
   assertBoundTo(managerId: string):
@@ -190,6 +193,30 @@ export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
     if (preflight.value.accountState !== "bound")
       throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
     await user.ensureManagerKnowledgeGoldRoles(controller);
+  }
+
+  /** Installs the distinct owner-bound Gold page role after canonical User preflight. */
+  async ensureManagerKnowledgeGoldPageRoles(
+    managerId: string,
+    controller: Fetcher<ManagerKnowledgeGoldPageController>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await controller.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-gold-page-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    await user.ensureManagerKnowledgeGoldPageRoles(controller);
   }
 }
 
