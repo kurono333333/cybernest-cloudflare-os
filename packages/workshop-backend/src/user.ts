@@ -23,7 +23,7 @@ import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, new
 const logger = createWorkshopLogger("workshop.user");
 
 const CYBERNEST_MANAGER_UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|f{8}-f{4}-f{4}-f{4}-f{12})$/u;
 
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
