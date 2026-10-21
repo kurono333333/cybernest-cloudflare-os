@@ -4,6 +4,21 @@ import type {
   GatekeeperUser,
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { ManagerKnowledgeBridge as ManagerKnowledgeBridgeImpl } from "../src/server.js";
+
+export const GOLD_CONTROL_CONTRACT = "cybernest-knowledge-gold-job-control-v1" as const;
+export const GOLD_PAGE_CONTROL_CONTRACT = "cybernest-knowledge-gold-page-control-v1" as const;
+
+type GoldJobRoleController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): typeof GOLD_CONTROL_CONTRACT | Promise<typeof GOLD_CONTROL_CONTRACT>;
+}>;
+type GoldPageRoleController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): typeof GOLD_PAGE_CONTROL_CONTRACT | Promise<typeof GOLD_PAGE_CONTROL_CONTRACT>;
+}>;
 
 export { default } from "../src/server.js";
 export * from "../src/server.js";
@@ -15,8 +30,27 @@ export {
   UserDurableObject,
 } from "../src/server.js";
 
-type ManagerKnowledgeCapability = {
-  assertBoundTo(managerId: string): Promise<void>;
+export type ManagerKnowledgeCapability = Fetcher<ManagerKnowledgeTestCapability>;
+type ManagerKnowledgeTestGoldRoleState = {
+  goldJobRole: "absent" | "installed";
+  goldPageRole: "absent" | "installed";
+  pageSlotEvents: string[];
+  jobSlotEvents: string[];
+};
+
+const managerKnowledgeGoldRoleStates = new Map<string, ManagerKnowledgeTestGoldRoleState>();
+const managerKnowledgeGoldRoleState = (managerId: string): ManagerKnowledgeTestGoldRoleState => {
+  let state = managerKnowledgeGoldRoleStates.get(managerId);
+  if (!state) {
+    state = {
+      goldJobRole: "absent",
+      goldPageRole: "absent",
+      pageSlotEvents: [],
+      jobSlotEvents: [],
+    };
+    managerKnowledgeGoldRoleStates.set(managerId, state);
+  }
+  return state;
 };
 
 type TestAccountProps = {
@@ -27,14 +61,15 @@ export let managerKnowledgeAccountCreations = 0;
 
 export class ManagerKnowledgeTestCapability
   extends WorkerEntrypoint<Cloudflare.Env, { managerId: string }> {
-  async assertBoundTo(managerId: string): Promise<void> {
+  async assertBoundTo(managerId: string): Promise<"cybernest-knowledge-read-v1"> {
     if (this.ctx.props.managerId !== managerId) {
       throw new Error("Test capability is bound to a different Manager.");
     }
+    return "cybernest-knowledge-read-v1";
   }
 }
 
-export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint {
+export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint<Cloudflare.Env> {
   async resetAccountCreations(): Promise<void> {
     managerKnowledgeAccountCreations = 0;
   }
@@ -43,30 +78,35 @@ export class ManagerKnowledgeTestCapabilityFactory extends WorkerEntrypoint {
     return managerKnowledgeAccountCreations;
   }
 
+  async readGoldRoleStateForTest(managerId: string): Promise<ManagerKnowledgeTestGoldRoleState> {
+    const state = managerKnowledgeGoldRoleState(managerId);
+    return {
+      ...state,
+      pageSlotEvents: [...state.pageSlotEvents],
+      jobSlotEvents: [...state.jobSlotEvents],
+    };
+  }
+
+  async captureBridgeEnsure(
+    managerId: string,
+  ): Promise<string | null> {
+    const capability = await this.create(managerId);
+    try {
+      const bridge = new ManagerKnowledgeBridgeImpl(this.ctx, this.env);
+      await bridge.ensureManagerKnowledge(managerId, capability);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async create(managerId: string): Promise<ManagerKnowledgeCapability> {
-    let workerExports = this.ctx.exports as unknown as {
+    let workerExports = this.ctx.exports as Cloudflare.Exports & {
       ManagerKnowledgeTestCapability(input: { props: { managerId: string } }): ManagerKnowledgeCapability;
     };
     return workerExports.ManagerKnowledgeTestCapability({ props: { managerId } });
   }
 
-  async ensureDuplicate(managerId: string): Promise<boolean> {
-    let capability = await this.create(managerId);
-    let bridge = (this.env as unknown as {
-      MANAGER_KNOWLEDGE_BRIDGE: {
-        ensureManagerKnowledge(
-          id: string,
-          access: ManagerKnowledgeCapability,
-        ): Promise<void>;
-      };
-    }).MANAGER_KNOWLEDGE_BRIDGE;
-    try {
-      await bridge.ensureManagerKnowledge(managerId, capability);
-      return false;
-    } catch (error) {
-      return error instanceof Error && error.message.includes("duplicate connected account");
-    }
-  }
 }
 
 export class ManagerKnowledgeTestVendor extends WorkerEntrypoint {
@@ -111,24 +151,83 @@ export class ManagerKnowledgeTestAccount
   async describe(): Promise<AccountDescription> {
     return {
       displayName: "Knowledge Base",
-      url: "knowledge://current",
+      avatar: { url: "" },
       singleton: { tsType: "KnowledgeBase" },
     };
   }
 
-  async inspectManagerBinding(managerId: string): Promise<"legacy" | "bound"> {
-    await this.ctx.props.capability.assertBoundTo(managerId);
-    return "bound";
+  async inspectManagerBinding(
+    managerId: string,
+  ): Promise<"legacy" | "bound" | "incompatible"> {
+    const contract = await this.ctx.props.capability.assertBoundTo(managerId);
+    return contract === "cybernest-knowledge-read-v1" ? "bound" : "incompatible";
+  }
+
+  async inspectBronzeRoles(managerId: string): Promise<{
+    writer: "absent";
+    sourceReader: "absent";
+  }> {
+    await this.#assertManager(managerId);
+    return { writer: "absent", sourceReader: "absent" };
+  }
+
+  async inspectGoldRole(managerId: string): Promise<"absent" | "installed" | "incompatible"> {
+    await this.#assertManager(managerId);
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.jobSlotEvents.push("inspect:" + managerId);
+    return state.goldJobRole;
+  }
+
+  async installGoldRole(
+    managerId: string,
+    controller: GoldJobRoleController,
+  ): Promise<void> {
+    await this.#assertManager(managerId);
+    if (await controller.assertBoundTo(managerId) !== GOLD_CONTROL_CONTRACT) {
+      throw new Error("Incompatible Gold job controller contract.");
+    }
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.jobSlotEvents.push("install:" + managerId);
+    state.goldJobRole = "installed";
+  }
+
+  async inspectGoldPageRole(
+    managerId: string,
+  ): Promise<"absent" | "installed" | "incompatible"> {
+    await this.#assertManager(managerId);
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.pageSlotEvents.push("inspect:" + managerId);
+    return state.goldPageRole;
+  }
+
+  async installGoldPageRole(
+    managerId: string,
+    controller: GoldPageRoleController,
+  ): Promise<void> {
+    await this.#assertManager(managerId);
+    if (await controller.assertBoundTo(managerId) !== GOLD_PAGE_CONTROL_CONTRACT) {
+      throw new Error("Incompatible Gold page controller contract.");
+    }
+    const state = managerKnowledgeGoldRoleState(managerId);
+    state.pageSlotEvents.push("install:" + managerId);
+    state.goldPageRole = "installed";
   }
 
   async revoke(): Promise<void> {}
+
+  async #assertManager(managerId: string): Promise<void> {
+    if (await this.ctx.props.capability.assertBoundTo(managerId) !==
+        "cybernest-knowledge-read-v1") {
+      throw new Error("Test Knowledge account is bound to another Manager.");
+    }
+  }
 }
 
 export class ManagerKnowledgeTestLegacyAccount extends WorkerEntrypoint {
   async describe(): Promise<AccountDescription> {
     return {
       displayName: "Custom Gatekeeper",
-      url: "custom://deployment-info",
+      avatar: { url: "" },
       singleton: { tsType: "CustomSession" },
     };
   }

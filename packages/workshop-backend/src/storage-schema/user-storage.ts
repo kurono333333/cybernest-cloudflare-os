@@ -165,6 +165,10 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       // null until a Cloudflare account is connected and resolved.
       cloudflareBilling: <CloudflareBilling | null>null,
 
+      // The Manager UUID whose identity was established by the normal signed OS connection proof.
+      // This marker is written only by presentProof() after proof verification succeeds.
+      cybernestManagerProofManagerId: <string | null>null,
+
       created: false,
       profile: <AiChatAuthorInfo>{
         type: "user",

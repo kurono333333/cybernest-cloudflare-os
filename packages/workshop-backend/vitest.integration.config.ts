@@ -28,6 +28,7 @@ const EXPECTED_RPC_ERROR_CODES = new Set([
 
 const EXPECTED_MANAGER_KNOWLEDGE_ERRORS = new Set([
   "Manager Knowledge integrity_failure: duplicate connected account.",
+  "Manager Knowledge integrity_failure: incompatible Gold controller contract.",
   "This Manager runtime is private and cannot be shared.",
   "A private Manager runtime cannot keep shared users.",
   "You don't have access to this workspace.",

@@ -12637,6 +12637,15 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     super();
   }
 
+  /**
+   * Private Gatekeeper-session context. The parent Overseer is the trusted workspace authority;
+   * callers cannot supply or select this identifier. This method is intentionally implemented
+   * only on the runtime queue target rather than added to the public shared ApprovalQueue API.
+   */
+  getWorkspaceId(): string {
+    return this.impl.ctx.id.toString();
+  }
+
   authorizeObservation(description: ObservationDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
     return this.impl.authorizeObservation(this.gatekeeperId, description, this.caller);
