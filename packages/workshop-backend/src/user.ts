@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiChatMessage, ActionLogEntry, type Overseer, AiModelConfig, RedactedAiModelConfig, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, ActionLogEntry, type Overseer, AiModelConfig, RedactedAiModelConfig, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -133,10 +133,6 @@ type ManagerKnowledgeGoldPageController = Readonly<{
   editPage(input: unknown): Promise<unknown>;
   requestProtectionReleaseAndCleanReplacement(input: unknown): Promise<unknown>;
 }>;
-
-type ManagerKnowledgeSourceSelector =
-  | Readonly<{ kind: "chat_message"; chatId: number; sequence: number }>
-  | Readonly<{ kind: "os_observation"; actionId: number; gatekeeperId: number }>;
 
 type ManagerKnowledgeVerifiedSource =
   | Readonly<{
@@ -1040,7 +1036,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     try {
       overseerId = this.ctx.exports.OverseerDurableObject.idFromString(workspaceId);
     } catch (cause) {
-      if (cause instanceof TypeError) throw new Error("Manager Knowledge permission_denied.");
+      if (cause instanceof TypeError)
+        throw new Error("Manager Knowledge permission_denied.", { cause });
       throw cause;
     }
     if (overseerId.toString() !== workspaceId)

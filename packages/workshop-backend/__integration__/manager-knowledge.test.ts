@@ -286,7 +286,7 @@ describe("Cybernest Manager Knowledge bridge", () => {
       target.storage.nextAccountId.put(-1);
     });
     const before = await userKnowledgeStorageSnapshot(user);
-    const capability = await factory.create(managerId);
+    await factory.create(managerId);
 
     await expect(bridge.inspectManagerKnowledge(managerId)).resolves.toEqual({
       ok: false,
@@ -566,7 +566,7 @@ describe("Cybernest Manager Knowledge bridge", () => {
       .MANAGER_KNOWLEDGE_BRIDGE;
     const factory = capabilityFactory();
     await factory.resetAccountCreations();
-    const capability = await factory.create(managerId);
+    await factory.create(managerId);
     const legacySnapshot = await userKnowledgeStorageSnapshot(user);
 
     await expect(bridge.inspectManagerKnowledge(managerId)).resolves.toEqual({
@@ -629,7 +629,7 @@ describe("Cybernest Manager Knowledge bridge", () => {
       vendorId: "custom",
       autoProvisioned: true,
     });
-    const duplicateCapability = await factory.create(duplicateManagerId);
+    await factory.create(duplicateManagerId);
     const duplicateSnapshot = await userKnowledgeStorageSnapshot(duplicateUser);
     await expect(bridge.inspectManagerKnowledge(duplicateManagerId)).resolves.toEqual({
       ok: false,

@@ -90,13 +90,6 @@ type ManagerKnowledgeGoldPageController = WorkerEntrypoint &
     Parameters<UserDurableObject["ensureManagerKnowledgeGoldPageRoles"]>[0];
 
 type ManagerKnowledgeSourceReaderProps = Readonly<{ managerId: string }>;
-type ManagerKnowledgeSourceReaderCapability = WorkerEntrypoint & Readonly<{
-  assertBoundTo(managerId: string):
-      | "cybernest-knowledge-source-read-v1"
-      | Promise<"cybernest-knowledge-source-read-v1">;
-  verifySource(input: unknown): Promise<unknown>;
-}>;
-
 /**
  * Native RPC entrypoint used by Core to install a Manager-bound Knowledge account in the OS.
  * This is intentionally separate from the HTTP Manager endpoint: Core supplies the opaque
