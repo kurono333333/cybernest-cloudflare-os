@@ -165,6 +165,17 @@ export interface PublicApi extends RpcTarget {
   downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
+/**
+ * Limited pre-authentication API for the private Cybernest OS connection. It exposes public
+ * Blueprint reads and accepts one short-lived connection proof to return that WebSocket's native
+ * AuthenticatedApi capability; the ordinary sign-in methods are not part of this surface.
+ */
+export interface CybernestConnectionBootstrapApi extends
+    RpcTarget, Pick<PublicApi, "getBlueprint" | "downloadBlueprint"> {
+  /** Validates the Manager connection proof and returns the authenticated capability for this socket. */
+  presentProof(proof: string): Promise<AuthenticatedApi>;
+}
+
 /** Subscription callback for AuthenticatedApi.subscribeConnectedAccounts(). */
 export interface ConnectedAccountsSubscriber {
   /**
@@ -435,6 +446,35 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/** Maximum number of messages returned by one native checkpoint history page. */
+export const CHAT_HISTORY_MAX_MESSAGES = 500;
+
+/** Maximum UTF-8 bytes across string values in one native history response. */
+export const CHAT_HISTORY_MAX_TEXT_BYTES = 2_097_152;
+
+/** Stable error codes attached to bounded chat-history failures. */
+export const CHAT_HISTORY_ERROR_CODES = {
+  messageLimitExceeded: "CHAT_HISTORY_MESSAGE_LIMIT_EXCEEDED",
+  textLimitExceeded: "CHAT_HISTORY_TEXT_LIMIT_EXCEEDED",
+} as const;
+
+/** An expected bounded chat-history failure code. */
+export type ChatHistoryErrorCode =
+    typeof CHAT_HISTORY_ERROR_CODES[keyof typeof CHAT_HISTORY_ERROR_CODES];
+
+const chatHistoryErrors = codedErrorFamily<ChatHistoryErrorCode>({
+  [CHAT_HISTORY_ERROR_CODES.messageLimitExceeded]:
+    "Chat history message limit exceeded.",
+  [CHAT_HISTORY_ERROR_CODES.textLimitExceeded]:
+    "Chat history text limit exceeded.",
+});
+
+/** Creates a bounded chat-history error with a machine-readable code. */
+export const createChatHistoryError = chatHistoryErrors.create;
+
+/** Reads the machine-readable code from a bounded chat-history error. */
+export const getChatHistoryErrorCode = chatHistoryErrors.getCode;
+
 /**
  * One user as listed in the deployment-wide user directory (see
  * `AuthenticatedApi.searchUsers`).
@@ -679,6 +719,12 @@ export interface AuthenticatedApi extends RpcTarget {
    * TODO(multi-gadget): This should be renamed to newWorkspace().
    */
   newGadget(): Promise<RpcStub<Overseer>>;
+
+  /**
+   * Resolve the current uniquely owned workspace, creating it only when explicitly prepared.
+   * `observe` is read-only and returns null when native metadata cannot identify one safe choice.
+   */
+  defaultWorkspace(mode: "prepare" | "observe"): Promise<string | null>;
 
   /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -2240,6 +2286,11 @@ export type GadgetMetadata = {
 export type GadgetMetadataWithTimestamps = GadgetMetadata & {
   created: Date;
   lastActive: Date;
+  /**
+   * Cybernest marks an explicitly created but not yet active workspace as unused. The field is
+   * optional here so older native records remain readable by the standard API.
+   */
+  lifecycle?: "unused" | "active";
 }
 
 /**
@@ -2945,15 +2996,10 @@ export interface Overseer extends RpcTarget {
   listModels(): Promise<AiChatAuthorInfo[]>;
 
   /**
-   * Fetch one page of messages in the chat history for the given chat thread. If `beforeSequence`
-   * is absent, fetch the current tail. Otherwise, fetch messages before that sequence.
-   *
-   * Note that if you plan to subscribe to updates, you should initiate the subscription first,
-   * before fetching history. Otherwise, you could theoretically miss a message that is sent
-   * between when you fetch the history and when you subscribe.
-   *
-   * In typical usage, the client subscribes to all chat activity upfront, but only fetches
-   * histories if and when the user opens a specific.
+   * Fetch one checkpoint-delimited page of messages in a chat. If `beforeSequence` is absent,
+   * fetch the current tail; otherwise fetch messages before that sequence. A checkpoint page is
+   * returned whole or rejected with a code from `CHAT_HISTORY_ERROR_CODES`, never silently
+   * truncated. Subscribe before fetching history to avoid missing messages between the two calls.
    */
   getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage>;
 

@@ -1,9 +1,9 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, ActionLogEntry, type Overseer, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   makeUserStorage, type BlueprintUserRecord, type CloudflareBilling, type ConnectedAccountRecord,
@@ -28,6 +28,9 @@ import {
 
 const logger = createWorkshopLogger("workshop.user");
 
+const CYBERNEST_MANAGER_UUID =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|f{8}-f{4}-f{4}-f{4}-f{12})$/u;
+
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
 const OUTPUTS_BACKFILL_PAGE = 16;
@@ -40,6 +43,12 @@ export const DEVICE_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60_000;
  * redeemable.
  */
 export const GATEKEEPER_USER_SELECTION_LIFETIME_MS = 30 * 60 * 1000;
+
+/**
+ * Keep user-owned workspace creation and list work bounded for the serverless runtime. There is no
+ * pagination UI in Cybernest 06, so the same limit bounds both creation and one list response.
+ */
+export const MAX_WORKSPACES_PER_USER = 100;
 
 /**
  * Metadata about an auto-provisioned account that provides an agent singleton and/or a management UI.
@@ -64,6 +73,132 @@ type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type ResourceCreatorStub = Required<Pick<GatekeeperVendor, "createResource">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 type CreationConfiguratorStub = Required<Pick<GatekeeperUser, "startCreationConfigurator">>;
+
+type ManagerKnowledgeCapability = {
+  assertBoundTo(managerId: string): Promise<"cybernest-knowledge-read-v1">;
+};
+
+type ManagerKnowledgeAccountState = "absent" | "bound" | "legacy" | "incompatible";
+type ManagerKnowledgePreflight = Readonly<{
+  managerId: string;
+  profileReady: true;
+  provenanceConfirmed: true;
+  accountState: ManagerKnowledgeAccountState;
+  bronzeRoles: Readonly<{
+    writer: "absent" | "installed" | "incompatible";
+    sourceReader: "absent" | "installed" | "incompatible";
+  }>;
+}>;
+export type ManagerKnowledgePreflightResult =
+  | Readonly<{ ok: true; value: ManagerKnowledgePreflight }>
+  | Readonly<{ ok: false; code: "dependency_unavailable" | "permission_denied" }>;
+
+type ManagerKnowledgeAccountCreator = {
+  createManagerAccount(
+    managerId: string,
+    capability: ManagerKnowledgeCapability,
+  ): Promise<Fetcher<GatekeeperUser>>;
+};
+
+type ManagerKnowledgeAccountStub = {
+  describe(): Promise<AccountDescription>;
+  inspectManagerBinding(managerId: string): Promise<"legacy" | "bound" | "incompatible">;
+  inspectBronzeRoles(managerId: string): Promise<ManagerKnowledgePreflight["bronzeRoles"]>;
+  installBronzeRoles(
+    managerId: string,
+    writer: ManagerKnowledgeBronzeWriter,
+    sourceReader: ManagerKnowledgeSourceReader,
+  ): Promise<void>;
+  inspectGoldRole(managerId: string): Promise<"absent" | "installed" | "incompatible">;
+  installGoldRole(managerId: string, controller: ManagerKnowledgeGoldController): Promise<void>;
+  inspectGoldPageRole(managerId: string): Promise<"absent" | "installed" | "incompatible">;
+  installGoldPageRole(
+    managerId: string,
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void>;
+};
+
+type ManagerKnowledgeBronzeWriter = {
+  assertBoundTo(managerId: string):
+    | "cybernest-knowledge-bronze-write-v2"
+    | Promise<"cybernest-knowledge-bronze-write-v2">;
+  validateCandidate(input: unknown): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
+  cancel(input: unknown): Promise<unknown>;
+};
+
+type ManagerKnowledgeSourceReader = {
+  assertBoundTo(managerId: string): string | Promise<string>;
+  verifySource(input: unknown): Promise<unknown>;
+};
+
+type ManagerKnowledgeGoldController = {
+  assertBoundTo(managerId: string):
+    | "cybernest-knowledge-gold-job-control-v1"
+    | Promise<"cybernest-knowledge-gold-job-control-v1">;
+  inspect(): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
+};
+
+type ManagerKnowledgeGoldPageController = Readonly<{
+  assertBoundTo(
+    managerId: string,
+  ): "cybernest-knowledge-gold-page-control-v1" |
+      Promise<"cybernest-knowledge-gold-page-control-v1">;
+  inspectPage(input: unknown): Promise<unknown>;
+  admitPageAction(input: unknown): Promise<unknown>;
+  editPage(input: unknown): Promise<unknown>;
+  requestProtectionReleaseAndCleanReplacement(input: unknown): Promise<unknown>;
+}>;
+
+type ManagerKnowledgeVerifiedSource =
+  | Readonly<{
+      version: "os-provenance-dto-v1";
+      kind: "chat_message";
+      chatId: number;
+      sequence: number;
+      timestampMs: number;
+      author: Readonly<{ type: "user" | "agent" | "gadget"; id: string }>;
+    }>
+  | Readonly<{
+      version: "os-provenance-dto-v1";
+      kind: "os_observation";
+      actionId: number;
+      gatekeeperId: number;
+      createdAtMs: number;
+      title: string;
+      resourceTitle: string;
+    }>;
+
+type ManagerKnowledgeAccountSlot = {
+  kind: "legacy" | "bound" | "incompatible";
+  record: ConnectedAccountRecord;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isKnowledgeDescription(description: AccountDescription): boolean {
+  return description.singleton?.tsType === "KnowledgeBase";
+}
+
+function isLegacyKnowledgeDescription(description: AccountDescription): boolean {
+  return description.singleton?.tsType === "CustomSession";
+}
+
+export function isManagerKnowledgeAccount(
+  record: {
+    vendorId: string;
+    autoProvisioned?: boolean;
+    description: AccountDescription;
+  },
+  privateManagerRuntime: boolean,
+): boolean {
+  return privateManagerRuntime &&
+      record.vendorId === "custom" &&
+      record.autoProvisioned === true && isKnowledgeDescription(record.description);
+}
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -132,6 +267,47 @@ export type UserChatContext = {
 
 function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
   return g.lastActive !== undefined;
+}
+
+function isValidGadgetRecord(record: unknown): record is GadgetRecord {
+  if (!isRecord(record) || typeof record.id !== "string" || record.id.length === 0 ||
+      typeof record.title !== "string" || !(record.created instanceof Date) ||
+      !Number.isFinite(record.created.getTime())) {
+    return false;
+  }
+  if (record.lastActive !== undefined &&
+      (!(record.lastActive instanceof Date) || !Number.isFinite(record.lastActive.getTime()))) {
+    return false;
+  }
+  if (record.lifecycle !== undefined && record.lifecycle !== "unused" &&
+      record.lifecycle !== "active") {
+    return false;
+  }
+  if (record.owner !== undefined && (!isRecord(record.owner) ||
+      (record.owner.type !== "user" && record.owner.type !== "agent" &&
+        record.owner.type !== "gadget") || typeof record.owner.id !== "string" ||
+      typeof record.owner.name !== "string" || (record.owner.commitEmail !== undefined &&
+        typeof record.owner.commitEmail !== "string"))) {
+    return false;
+  }
+  if (record.role !== undefined && record.role !== "build" && record.role !== "use") return false;
+  if (record.pinned !== undefined && typeof record.pinned !== "boolean") return false;
+  if (record.totalCost !== undefined && (typeof record.totalCost !== "number" ||
+      !Number.isFinite(record.totalCost))) {
+    return false;
+  }
+  if (record.containsRestrictedData !== undefined &&
+      typeof record.containsRestrictedData !== "boolean") {
+    return false;
+  }
+  if (record.ownerInvitesOnly !== undefined && typeof record.ownerInvitesOnly !== "boolean") {
+    return false;
+  }
+  if (record.defaultGadgetId !== undefined &&
+      (typeof record.defaultGadgetId !== "number" || !Number.isSafeInteger(record.defaultGadgetId))) {
+    return false;
+  }
+  return true;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -204,6 +380,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   #notificationSubscribers = new Map<object, RpcStub<NotificationSubscriber>>();
+  #knowledgeEnsurePromise?: Promise<void>;
+  #knowledgeBronzeEnsurePromise?: Promise<void>;
+  #knowledgeGoldEnsurePromise?: Promise<void>;
+  #knowledgeGoldPageEnsurePromise?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -415,6 +595,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return null;
     }
 
+    // Do a little migration here for old data. Records without lastActive remain provisional;
+    // promoting them here would expose internal chat/agent records in the user list.
+    // TODO(soon): Delete this.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
+      let changed = false;
+      if (!gadget.created) {
+        gadget.created = new Date("2026-01-01");
+        changed = true;
+      }
+      if (gadget.lastActive && gadget.lifecycle === undefined) {
+        gadget.lifecycle = "active";
+        changed = true;
+      }
+      if (changed) {
+        this.storage.gadgets.put(gadget);
+      }
+    }
+
     this.storage.created.put(true);
     this.storage.profile.put({
       type: "user",
@@ -559,13 +757,579 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.profile.get();
   }
 
+  #managerKnowledgePreflightFailure(
+      managerId: string): "dependency_unavailable" | "permission_denied" | undefined {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId) ||
+        !this.ctx.id.equals(this.ctx.exports.UserDurableObject.idFromName(managerId))) {
+      return "permission_denied";
+    }
+    if (this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME !== "true" ||
+        !this.storage.created.get()) {
+      return "dependency_unavailable";
+    }
+
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || profile.id !== managerId ||
+        typeof profile.name !== "string") {
+      return "permission_denied";
+    }
+
+    const proofManagerId: unknown = this.storage.cybernestManagerProofManagerId.get();
+    if (proofManagerId === null || proofManagerId === undefined) {
+      return "dependency_unavailable";
+    }
+    if (proofManagerId !== managerId) return "permission_denied";
+    return undefined;
+  }
+
+  #requireManagerKnowledgePreflight(managerId: string): void {
+    const failure = this.#managerKnowledgePreflightFailure(managerId);
+    if (failure) {
+      throw new Error(`Manager Knowledge preflight failed: ${failure}.`);
+    }
+  }
+
+  /** Read-only state used by Core before it issues a Manager Knowledge capability. */
+  async inspectManagerKnowledge(managerId: string): Promise<ManagerKnowledgePreflightResult> {
+    const failure = this.#managerKnowledgePreflightFailure(managerId);
+    if (failure) return { ok: false, code: failure };
+
+    try {
+      const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+      const latestFailure = this.#managerKnowledgePreflightFailure(managerId);
+      if (latestFailure) return { ok: false, code: latestFailure };
+      const bronzeRoles = slots[0]?.kind === "bound"
+        ? await (slots[0].record.account as unknown as ManagerKnowledgeAccountStub)
+            .inspectBronzeRoles(managerId)
+        : { writer: "absent", sourceReader: "absent" } as const;
+      return {
+        ok: true,
+        value: {
+          managerId,
+          profileReady: true,
+          provenanceConfirmed: true,
+          accountState: slots[0]?.kind ?? "absent",
+          bronzeRoles,
+        },
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith(
+        "Manager Knowledge integrity_failure:",
+      )) {
+        logger.warn("Manager Knowledge preflight scan failed closed", {
+          event: "manager.knowledge.preflight.account_scan.failed",
+          error,
+        });
+        return { ok: false, code: "dependency_unavailable" };
+      }
+      throw error;
+    }
+  }
+
   /**
-   * Called by the overseer every time a collaborator opens a shared gadget.
-   * Creates the record on first open; updates lastActive on subsequent opens.
-   *
-   * `role` is cached so listings built from this DO can offer the actions it permits without
-   * reopening the workspace to ask. Presentation only: every operation is still authorized by the
-   * Overseer when attempted.
+   * Initialize the User DO for Cybernest's manager-derived identity. The caller validates the
+   * manager ID before reaching this DO; keeping the comparison here makes the operation
+   * idempotent without allowing a later request to overwrite an existing profile.
+   */
+  async ensureCybernestManager(
+      managerId: string, confirmedByConnectionProof = false): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId) ||
+        !this.ctx.id.equals(this.ctx.exports.UserDurableObject.idFromName(managerId))) {
+      throw new TypeError("Manager ID does not match the User DO identity.");
+    }
+    if (confirmedByConnectionProof &&
+        this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME !== "true") {
+      throw new Error("Cybernest proof marker requires the private Manager runtime.");
+    }
+
+    if (!this.storage.created.get()) {
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: "Manager",
+        id: managerId,
+      });
+    } else {
+      const profile = this.storage.profile.get();
+      if (profile.type !== "user" || profile.id !== managerId) {
+        throw new Error("Cybernest manager profile does not match the User DO identity.");
+      }
+    }
+    if (confirmedByConnectionProof) {
+      this.storage.cybernestManagerProofManagerId.put(managerId);
+    }
+    this.#syncDirectory();
+  }
+
+  #validateManagerKnowledgeRecord(value: unknown, slotId: number): ConnectedAccountRecord {
+    if (!isRecord(value) || !Number.isSafeInteger(value.id) || value.id !== slotId ||
+        typeof value.vendorId !== "string" ||
+        (typeof value.account !== "object" && typeof value.account !== "function") ||
+        !isRecord(value.description) || typeof value.description.displayName !== "string" ||
+        (value.description.url !== undefined && typeof value.description.url !== "string") ||
+        (value.autoProvisioned !== undefined && typeof value.autoProvisioned !== "boolean") ||
+        (value.description.singleton !== undefined &&
+          (!isRecord(value.description.singleton) ||
+            typeof value.description.singleton.tsType !== "string"))) {
+      throw new Error("Manager Knowledge integrity_failure: malformed connected account.");
+    }
+    return value as unknown as ConnectedAccountRecord;
+  }
+
+  async #readManagerKnowledgeAccountSlots(managerId: string): Promise<ManagerKnowledgeAccountSlot[]> {
+    let matches: ManagerKnowledgeAccountSlot[] = [];
+    let nextAccountId = this.storage.nextAccountId.get();
+    if (!Number.isSafeInteger(nextAccountId) || nextAccountId < 0) {
+      throw new Error("Manager Knowledge integrity_failure: invalid account cursor.");
+    }
+    for (let id = 0; id < nextAccountId; id++) {
+      let raw: unknown;
+      try {
+        raw = this.storage.connectedAccounts.get(id);
+      } catch (error) {
+        throw new Error("Manager Knowledge integrity_failure: unreadable connected account.", {
+          cause: error,
+        });
+      }
+      if (raw === undefined) continue;
+
+      let record = this.#validateManagerKnowledgeRecord(raw, id);
+      if (record.vendorId !== "custom") continue;
+
+      let isKnowledge = isKnowledgeDescription(record.description);
+      let isLegacy = isLegacyKnowledgeDescription(record.description);
+      if (!isKnowledge && !isLegacy) {
+        throw new Error("Manager Knowledge integrity_failure: unexpected custom account.");
+      }
+
+      let binding = await (record.account as unknown as ManagerKnowledgeAccountStub)
+          .inspectManagerBinding(managerId);
+      if (binding === "bound") {
+        if (!isKnowledge || record.autoProvisioned !== true) {
+          throw new Error("Manager Knowledge integrity_failure: malformed bound account.");
+        }
+        matches.push({ kind: "bound", record });
+      } else if (binding === "legacy") {
+        matches.push({ kind: "legacy", record });
+      } else if (binding === "incompatible") {
+        matches.push({ kind: "incompatible", record });
+      } else {
+        throw new Error("Manager Knowledge integrity_failure: invalid account binding state.");
+      }
+    }
+
+    if (matches.length > 1) {
+      throw new Error("Manager Knowledge integrity_failure: duplicate connected account.");
+    }
+    return matches;
+  }
+
+  async #createManagerKnowledgeAccount(
+    managerId: string,
+    capability: ManagerKnowledgeCapability,
+  ): Promise<{ account: Fetcher<GatekeeperUser>; description: AccountDescription }> {
+    let vendor = this.vendors.get("custom");
+    if (!vendor) throw new Error("Manager Knowledge integrity_failure: custom vendor is missing.");
+
+    let creator = vendor as unknown as ManagerKnowledgeAccountCreator;
+    if (typeof creator.createManagerAccount !== "function") {
+      throw new Error("Manager Knowledge integrity_failure: custom vendor is not compatible.");
+    }
+
+    let account: Fetcher<GatekeeperUser> | undefined;
+    try {
+      account = await creator.createManagerAccount(managerId, capability);
+      if (typeof account !== "object" && typeof account !== "function") {
+        throw new Error("Manager Knowledge integrity_failure: custom account is malformed.");
+      }
+      let description = await account.describe();
+      if (!isKnowledgeDescription(description)) {
+        throw new Error("Manager Knowledge integrity_failure: custom account is not Knowledge.");
+      }
+      let binding = await (account as unknown as ManagerKnowledgeAccountStub)
+          .inspectManagerBinding(managerId);
+      if (binding !== "bound") {
+        throw new Error("Manager Knowledge integrity_failure: created account is not bound.");
+      }
+      return { account, description };
+    } catch (error) {
+      if (account && (typeof account === "object" || typeof account === "function")) {
+        await this.#discardManagerKnowledgeAccount(account);
+      }
+      throw error;
+    }
+  }
+
+  async #discardManagerKnowledgeAccount(account: Fetcher<GatekeeperUser>): Promise<void> {
+    try {
+      await account.revoke();
+    } catch (error) {
+      logger.warn("failed to discard duplicate Manager Knowledge account", {
+        event: "manager.knowledge.account.discard.failed", error,
+      });
+    }
+  }
+
+  ensureKnowledgeAccount(capability: ManagerKnowledgeCapability): Promise<void> {
+    return (this.#knowledgeEnsurePromise ??=
+      this.#ensureKnowledgeAccount(capability).finally(() => {
+        this.#knowledgeEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureKnowledgeAccount(capability: ManagerKnowledgeCapability): Promise<void> {
+    if (!this.storage.created.get()) {
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    }
+    let profile = this.storage.profile.get();
+    if (profile.type !== "user" || !CYBERNEST_MANAGER_UUID.test(profile.id)) {
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    }
+    this.#requireManagerKnowledgePreflight(profile.id);
+    const contract = await capability.assertBoundTo(profile.id);
+    if (contract !== "cybernest-knowledge-read-v1") {
+      throw new Error("Manager Knowledge integrity_failure: incompatible reader contract.");
+    }
+    this.#requireManagerKnowledgePreflight(profile.id);
+
+    let existing = await this.#readManagerKnowledgeAccountSlots(profile.id);
+    this.#requireManagerKnowledgePreflight(profile.id);
+    if (existing[0]?.kind === "bound") return;
+    if (existing[0]?.kind === "legacy") {
+      throw new Error("Manager Knowledge integrity_failure: legacy connected account is not replaceable.");
+    }
+    if (existing[0]?.kind === "incompatible") {
+      throw new Error("Manager Knowledge integrity_failure: connected account is incompatible.");
+    }
+
+    let created = await this.#createManagerKnowledgeAccount(profile.id, capability);
+
+    // The RPCs above release the User DO input gate. Re-read every slot before persisting so a
+    // concurrent invocation cannot create a second singleton or overwrite a newly-created record.
+    try {
+      this.#requireManagerKnowledgePreflight(profile.id);
+      existing = await this.#readManagerKnowledgeAccountSlots(profile.id);
+      this.#requireManagerKnowledgePreflight(profile.id);
+    } catch (error) {
+      await this.#discardManagerKnowledgeAccount(created.account);
+      throw error;
+    }
+    if (existing[0]?.kind === "bound") {
+      await this.#discardManagerKnowledgeAccount(created.account);
+      return;
+    }
+    if (existing[0]?.kind === "legacy" || existing[0]?.kind === "incompatible") {
+      await this.#discardManagerKnowledgeAccount(created.account);
+      throw new Error(existing[0].kind === "legacy"
+        ? "Manager Knowledge integrity_failure: legacy connected account is not replaceable."
+        : "Manager Knowledge integrity_failure: connected account is incompatible.");
+    }
+
+    try {
+      this.ctx.storage.transactionSync(() => {
+        this.#requireManagerKnowledgePreflight(profile.id);
+        let accountId = this.storage.nextAccountId.get();
+        if (!Number.isSafeInteger(accountId) || accountId < 0) {
+          throw new Error("Manager Knowledge integrity_failure: invalid account cursor.");
+        }
+        this.storage.nextAccountId.put(accountId + 1);
+        this.storage.connectedAccounts.put({
+          id: accountId,
+          account: created.account,
+          description: created.description,
+          vendorId: "custom",
+          autoProvisioned: true,
+        });
+      });
+    } catch (error) {
+      await this.#discardManagerKnowledgeAccount(created.account);
+      throw error;
+    }
+  }
+
+  ensureManagerKnowledgeBronzeRoles(writer: ManagerKnowledgeBronzeWriter): Promise<void> {
+    return (this.#knowledgeBronzeEnsurePromise ??=
+      this.#ensureManagerKnowledgeBronzeRoles(writer).finally(() => {
+        this.#knowledgeBronzeEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureManagerKnowledgeBronzeRoles(
+    writer: ManagerKnowledgeBronzeWriter,
+  ): Promise<void> {
+    if (!this.storage.created.get())
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || typeof profile.id !== "string" ||
+        !CYBERNEST_MANAGER_UUID.test(profile.id))
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    const managerId = profile.id;
+    this.#requireManagerKnowledgePreflight(managerId);
+    if (await writer.assertBoundTo(managerId) !== "cybernest-knowledge-bronze-write-v2")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Bronze writer contract.");
+
+    const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const account = slots[0];
+    if (account?.kind !== "bound")
+      throw new Error("Manager Knowledge dependency_unavailable: read account is not bound.");
+
+    const sourceReader = this.ctx.exports.ManagerKnowledgeSourceReader({
+      props: { managerId },
+    });
+    if (await sourceReader.assertBoundTo(managerId) !== "cybernest-knowledge-source-read-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible source-reader contract.");
+
+    this.#requireManagerKnowledgePreflight(managerId);
+    await (account.record.account as unknown as ManagerKnowledgeAccountStub)
+      .installBronzeRoles(managerId, writer, sourceReader);
+    this.#requireManagerKnowledgePreflight(managerId);
+
+    const roles = await (account.record.account as unknown as ManagerKnowledgeAccountStub)
+      .inspectBronzeRoles(managerId);
+    if (roles.writer !== "installed" || roles.sourceReader !== "installed")
+      throw new Error("Manager Knowledge dependency_unavailable: Bronze role install incomplete.");
+  }
+
+  ensureManagerKnowledgeGoldRoles(controller: ManagerKnowledgeGoldController): Promise<void> {
+    return (this.#knowledgeGoldEnsurePromise ??=
+      this.#ensureManagerKnowledgeGoldRoles(controller).finally(() => {
+        this.#knowledgeGoldEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureManagerKnowledgeGoldRoles(
+    controller: ManagerKnowledgeGoldController,
+  ): Promise<void> {
+    if (!this.storage.created.get())
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || typeof profile.id !== "string" ||
+        !CYBERNEST_MANAGER_UUID.test(profile.id))
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    const managerId = profile.id;
+    this.#requireManagerKnowledgePreflight(managerId);
+    if (await controller.assertBoundTo(managerId) !== "cybernest-knowledge-gold-job-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const account = slots[0];
+    if (account?.kind !== "bound")
+      throw new Error("Manager Knowledge dependency_unavailable: read account is not bound.");
+
+    const accountStub = account.record.account as unknown as ManagerKnowledgeAccountStub;
+    const current = await accountStub.inspectGoldRole(managerId);
+    if (current === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold role slot.");
+    if (current === "absent") {
+      this.#requireManagerKnowledgePreflight(managerId);
+      await accountStub.installGoldRole(managerId, controller);
+      this.#requireManagerKnowledgePreflight(managerId);
+    }
+
+    const installed = await accountStub.inspectGoldRole(managerId);
+    if (installed !== "installed")
+      throw new Error("Manager Knowledge dependency_unavailable: Gold role install incomplete.");
+  }
+
+  ensureManagerKnowledgeGoldPageRoles(
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void> {
+    return (this.#knowledgeGoldPageEnsurePromise ??=
+      this.#ensureManagerKnowledgeGoldPageRoles(controller).finally(() => {
+        this.#knowledgeGoldPageEnsurePromise = undefined;
+      }));
+  }
+
+  async #ensureManagerKnowledgeGoldPageRoles(
+    controller: ManagerKnowledgeGoldPageController,
+  ): Promise<void> {
+    if (!this.storage.created.get())
+      throw new Error("Manager Knowledge integrity_failure: User profile is missing.");
+    const profile: unknown = this.storage.profile.get();
+    if (!isRecord(profile) || profile.type !== "user" || typeof profile.id !== "string" ||
+        !CYBERNEST_MANAGER_UUID.test(profile.id))
+      throw new Error("Manager Knowledge integrity_failure: User profile is not a Manager.");
+    const managerId = profile.id;
+    this.#requireManagerKnowledgePreflight(managerId);
+    if (await controller.assertBoundTo(managerId) !==
+        "cybernest-knowledge-gold-page-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const slots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const account = slots[0];
+    if (account?.kind !== "bound")
+      throw new Error("Manager Knowledge dependency_unavailable: read account is not bound.");
+
+    const accountStub = account.record.account as unknown as ManagerKnowledgeAccountStub;
+    const current = await accountStub.inspectGoldPageRole(managerId);
+    if (current === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold page-role slot.");
+    if (current === "absent") {
+      this.#requireManagerKnowledgePreflight(managerId);
+      const installSlots = await this.#readManagerKnowledgeAccountSlots(managerId);
+      this.#requireManagerKnowledgePreflight(managerId);
+      const installAccount = installSlots[0];
+      if (installAccount?.kind !== "bound" ||
+          installAccount.record.id !== account.record.id)
+        throw new Error("Manager Knowledge dependency_unavailable: read account changed.");
+      const installAccountStub =
+        installAccount.record.account as unknown as ManagerKnowledgeAccountStub;
+      if (await controller.assertBoundTo(managerId) !==
+          "cybernest-knowledge-gold-page-control-v1")
+        throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+      await installAccountStub.installGoldPageRole(managerId, controller);
+      this.#requireManagerKnowledgePreflight(managerId);
+    }
+
+    const readbackSlots = await this.#readManagerKnowledgeAccountSlots(managerId);
+    this.#requireManagerKnowledgePreflight(managerId);
+    const readbackAccount = readbackSlots[0];
+    if (readbackAccount?.kind !== "bound" ||
+        readbackAccount.record.id !== account.record.id)
+      throw new Error("Manager Knowledge dependency_unavailable: read account changed.");
+    const installed = await (readbackAccount.record.account as unknown as ManagerKnowledgeAccountStub)
+      .inspectGoldPageRole(managerId);
+    if (installed !== "installed")
+      throw new Error("Manager Knowledge dependency_unavailable: Gold page-role install incomplete.");
+  }
+
+  /**
+   * Resolve only OS-owned source metadata through this Manager's User Durable Object. The
+   * workspace selector is never used to find an arbitrary owner: it must already be a fully
+   * created, owner-only workspace in this User DO's native registry.
+   */
+  async verifyManagerKnowledgeSource(
+    managerId: string,
+    input: unknown,
+  ): Promise<ManagerKnowledgeVerifiedSource> {
+    const failure = this.#managerKnowledgePreflightFailure(managerId);
+    if (failure) throw new Error(`Manager Knowledge ${failure}.`);
+    if (!isRecord(input) || Object.keys(input).length !== 2 ||
+        !Object.prototype.hasOwnProperty.call(input, "workspaceId") ||
+        !Object.prototype.hasOwnProperty.call(input, "selector") ||
+        typeof input.workspaceId !== "string" || input.workspaceId.length === 0 ||
+        !isRecord(input.selector)) {
+      throw new Error("Manager Knowledge invalid_input.");
+    }
+
+    const workspaceId = input.workspaceId as string;
+    const record = this.storage.gadgets.get(workspaceId);
+    if (record === undefined || record.id !== workspaceId || record.owner !== undefined ||
+        !isFullyCreated(record)) {
+      throw new Error("Manager Knowledge permission_denied.");
+    }
+
+    let overseerId: DurableObjectId;
+    try {
+      overseerId = this.ctx.exports.OverseerDurableObject.idFromString(workspaceId);
+    } catch (cause) {
+      if (cause instanceof TypeError)
+        throw new Error("Manager Knowledge permission_denied.", { cause });
+      throw cause;
+    }
+    if (overseerId.toString() !== workspaceId)
+      throw new Error("Manager Knowledge permission_denied.");
+    const overseer = this.ctx.exports.OverseerDurableObject.get(overseerId);
+    let session: NativeRpcStub<Overseer> | undefined;
+    let verified: ManagerKnowledgeVerifiedSource;
+    const notifyClosed = () => {};
+    (notifyClosed as unknown as { [Symbol.dispose]?: () => void })[Symbol.dispose] = () => {};
+    try {
+      session = await overseer.open(
+        this.ctx.id.toString(),
+        managerId,
+        notifyClosed as NativeRpcStub<() => void>,
+      );
+
+      const selector = input.selector as Record<string, unknown>;
+      if (selector.kind === "chat_message") {
+      if (Object.keys(selector).length !== 3 ||
+          !Object.prototype.hasOwnProperty.call(selector, "chatId") ||
+          !Object.prototype.hasOwnProperty.call(selector, "sequence") ||
+          !Number.isSafeInteger(selector.chatId) || (selector.chatId as number) < 0 ||
+          !Number.isSafeInteger(selector.sequence) || (selector.sequence as number) < 0) {
+        throw new Error("Manager Knowledge invalid_input.");
+      }
+      const chatId = selector.chatId as number;
+      const sequence = selector.sequence as number;
+      const message = await session.getChatMessage(chatId, sequence);
+      const authorType = message?.author.type;
+      if (message === undefined || message.type !== "message" ||
+          !Number.isSafeInteger(message.chatId) || message.chatId !== chatId ||
+          !Number.isSafeInteger(message.sequence) || message.sequence !== sequence ||
+          !(message.timestamp instanceof Date) ||
+          !Number.isSafeInteger(message.timestamp.getTime()) || message.timestamp.getTime() < 0 ||
+          !isRecord(message.author) ||
+          (authorType !== "user" && authorType !== "agent" && authorType !== "gadget") ||
+          typeof message.author.id !== "string" || message.author.id.length === 0) {
+        throw new Error("Manager Knowledge invalid_input.");
+      }
+      verified = {
+        version: "os-provenance-dto-v1",
+        kind: "chat_message",
+        chatId,
+        sequence,
+        timestampMs: message.timestamp.getTime(),
+        author: { type: message.author.type, id: message.author.id },
+      };
+      } else if (selector.kind === "os_observation") {
+      if (Object.keys(selector).length !== 3 ||
+          !Object.prototype.hasOwnProperty.call(selector, "actionId") ||
+          !Object.prototype.hasOwnProperty.call(selector, "gatekeeperId") ||
+          !Number.isSafeInteger(selector.actionId) || (selector.actionId as number) < 0 ||
+          !Number.isSafeInteger(selector.gatekeeperId) || (selector.gatekeeperId as number) < 0) {
+        throw new Error("Manager Knowledge invalid_input.");
+      }
+      const actionId = selector.actionId as number;
+      const gatekeeperId = selector.gatekeeperId as number;
+      const page = await session.listActions({
+        ...(actionId < Number.MAX_SAFE_INTEGER ? { beforeId: actionId + 1 } : {}),
+        filter: "all",
+      });
+      const action: ActionLogEntry | undefined = page.entries.find((entry) => entry.id === actionId);
+      if (action === undefined || action.type !== "observation" ||
+          action.gatekeeperId !== gatekeeperId ||
+          !Number.isSafeInteger(action.id) || action.id < 0 ||
+          !Number.isSafeInteger(action.gatekeeperId) || action.gatekeeperId < 0 ||
+          !(action.createdAt instanceof Date) ||
+          !Number.isSafeInteger(action.createdAt.getTime()) || action.createdAt.getTime() < 0 ||
+          typeof action.description.title !== "string" ||
+          typeof action.resourceTitle !== "string") {
+        throw new Error("Manager Knowledge invalid_input.");
+      }
+      verified = {
+        version: "os-provenance-dto-v1",
+        kind: "os_observation",
+        actionId,
+        gatekeeperId,
+        createdAtMs: action.createdAt.getTime(),
+        title: action.description.title,
+        resourceTitle: action.resourceTitle,
+      };
+      } else {
+        throw new Error("Manager Knowledge invalid_input.");
+      }
+    } finally {
+      session?.[Symbol.dispose]?.();
+    }
+
+    const latestFailure = this.#managerKnowledgePreflightFailure(managerId);
+    const latestRecord = this.storage.gadgets.get(workspaceId);
+    if (latestFailure) throw new Error(`Manager Knowledge ${latestFailure}.`);
+    if (latestRecord === undefined || latestRecord.owner !== undefined ||
+        !isFullyCreated(latestRecord)) {
+      throw new Error("Manager Knowledge permission_denied.");
+    }
+    return verified;
+  }
+
+  /**
+   * Called by the overseer every time a collaborator opens a shared gadget. Creates the record on
+   * first open; updates lastActive on subsequent opens. `role` is cached so listings can offer
+   * permitted actions without reopening the workspace; authorization remains at the Overseer.
    */
   async recordSharedGadgetOpen(
       gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo, role?: CollaboratorRole
@@ -578,6 +1342,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (record) {
       // Already tracked -- update lastActive and cached fields.
       record.lastActive = now;
+      record.lifecycle = "active";
       record.title = title;
       record.owner = ownerProfile;
       record.role = role;
@@ -591,6 +1356,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         role,
         created: now,
         lastActive: now,
+        lifecycle: "active",
       });
     }
   }
@@ -915,6 +1681,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     for (let gadget of this.storage.gadgets.list()) {
       if (isFullyCreated(gadget)) {
         result.push(gadget);
+        if (result.length === MAX_WORKSPACES_PER_USER) break;
       }
     }
     return result;
@@ -943,19 +1710,83 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async newGadget(id: string, title: string): Promise<void> {
+    if (this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME !== "true") {
+      // The standard runtime keeps newly opened workspaces provisional until activity begins.
+      return this.newProvisionalGadget(id, title);
+    }
+
+    const ownedCount = Array.from(this.storage.gadgets.list())
+      .filter(gadget => gadget.owner === undefined)
+      .length;
+    this.#writeNewGadgetRecord(id, title, ownedCount);
+  }
+
+  defaultWorkspace(mode: "prepare" | "observe"): string | null {
+    return this.storage.transaction(() => {
+      let records: GadgetRecord[];
+      try {
+        records = Array.from(this.storage.gadgets.list());
+      } catch (error) {
+        logger.warn("Could not read native workspace metadata for default workspace.", {
+          event: "workspace.default.metadata.read.failed",
+          error,
+        });
+        return null;
+      }
+      if (!records.every(isValidGadgetRecord)) return null;
+      for (const {id} of records) {
+        try {
+          this.ctx.exports.OverseerDurableObject.idFromString(id);
+        } catch (error) {
+          if (error instanceof TypeError) return null;
+          throw error;
+        }
+      }
+
+      const owned = records.filter((gadget) => gadget.owner === undefined);
+      if (owned.some((gadget) => !isFullyCreated(gadget))) return null;
+      if (owned.length === 1) return owned[0]!.id;
+      if (owned.length > 1 || mode === "observe") return null;
+
+      const id = this.ctx.exports.OverseerDurableObject.newUniqueId().toString();
+      this.#writeNewGadgetRecord(id, "Untitled Workspace", owned.length);
+      return id;
+    });
+  }
+
+  #writeNewGadgetRecord(id: string, title: string, ownedCount: number): void {
+    if (ownedCount >= MAX_WORKSPACES_PER_USER) {
+      throw new Error("Workspace limit reached.");
+    }
     let created = new Date();
-    this.storage.gadgets.put({id, title, created});
+    this.storage.gadgets.put({id, title, created, lastActive: created, lifecycle: "unused"});
+  }
+
+  /**
+   * Internal agent/external-message registration must remain provisional until the existing
+   * activity path calls setGadgetLastActive(). It deliberately does not call newGadget(), whose
+   * semantics are the user-visible durable creation boundary.
+   */
+  async newProvisionalGadget(id: string, title: string): Promise<void> {
+    const ownedCount = Array.from(this.storage.gadgets.list())
+      .filter(gadget => gadget.owner === undefined)
+      .length;
+    if (ownedCount >= MAX_WORKSPACES_PER_USER) {
+      throw new Error("Workspace limit reached.");
+    }
+    this.storage.gadgets.put({id, title, created: new Date()});
   }
 
   async ensureGadgetRegistered(id: string, title: string): Promise<void> {
     if (this.storage.gadgets.get(id)) return;
-    await this.newGadget(id, title);
+    await this.newProvisionalGadget(id, title);
   }
 
   async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
     let gadget = this.storage.gadgets.get(id);
     if (gadget) {
       gadget.lastActive = time;
+      gadget.lifecycle = "active";
       if (totalCost) {
         gadget.totalCost = totalCost;
       }
@@ -1505,8 +2336,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
     await this.#ensureAutoProvisionedAccounts();
     let config = await readAdminConfig(this.env);
+    let privateManagerRuntime = this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
+      if (isManagerKnowledgeAccount(rec, privateManagerRuntime)) {
+        result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+        continue;
+      }
       if (!rec.description.singleton && !rec.description.providesUi) continue;
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
@@ -1659,6 +2495,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let seenIds = new Set<number>();
     let vendorDescriptions = new Map<string, Promise<VendorDescription>>();
+    let privateManagerRuntime = this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
 
     // Snapshot the admin config once for this subscription. Changes take effect when the client
     // re-subscribes (e.g. on reconnect), matching other deployment config.
@@ -1666,6 +2503,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
     async function notifyAdd(record: ConnectedAccountRecord) {
+      // The Manager Knowledge account is an OS-owned ambient singleton. It is visible to the
+      // agent through listProvidedAccounts(), but never appears as a user connector.
+      if (isManagerKnowledgeAccount(record, privateManagerRuntime)) return;
+
       // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
       // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
       // nothing to manage, and "disabled" ones are dormant, so both are hidden.
@@ -1773,6 +2614,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async disconnectAccount(accountId: number): Promise<void> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
+      if (isManagerKnowledgeAccount(
+        account,
+        this.env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true",
+      )) {
+        throw new Error("The Manager Knowledge account is owned by the Manager and can't be disconnected.");
+      }
       if (account.autoProvisioned) {
         // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
         if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {

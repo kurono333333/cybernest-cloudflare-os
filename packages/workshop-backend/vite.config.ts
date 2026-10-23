@@ -83,7 +83,8 @@ export default {
       test: {
         ...vitestTask([
           { command: 'vitest run', idleSeconds: 120 },
-          'vitest run --config vitest.integration.config.ts',
+          // The native socket deadline case runs in its own manually dispatched workflow.
+          'vitest run --config vitest.integration.config.ts --testNamePattern="^(?!.*closes guest and authenticated native sockets at the accept-based one-hour deadline$).*"',
         ]),
         dependsOn: [
           '@gadgets/typed-storage#build', 'build:bundled-blueprints', 'build:browser-runtime',

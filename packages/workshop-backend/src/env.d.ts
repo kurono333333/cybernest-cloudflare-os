@@ -21,6 +21,9 @@ declare global {
       CF_AI_GATEWAY_API_TOKEN?: string;   // Run + Read token; optional when the binding transport
                                           // applies (still required for google)
       CF_AI_GATEWAY_USE_BINDING?: string;
+      // Legacy Workers AI gateway routing retained for existing deployments.
+      CF_AI_GATEWAY_WAI?: string;
+      CF_AI_GATEWAY_WAI_DIRECT?: string;
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 
@@ -57,6 +60,18 @@ declare global {
       // redeclared here: wrangler's generated types make it required, and TypeScript 7 rejects
       // weakening it to optional in a merged augmentation. Self-hosted deployments may omit the
       // binding, so use sites read it as `BrowserRun | undefined` and null-check.
+
+      // Existing private Manager runtime switch used by owner-only Workspace behavior.
+      CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+
+      // Connection proofs for the private Cybernest OS bootstrap. The JWK contains only the
+      // verification key; these values are deployment configuration, not per-request input.
+      CYBERNEST_OS_PROOF_PUBLIC_JWK?: string;
+      CYBERNEST_OS_PROOF_ISSUER?: string;
+      CYBERNEST_OS_PROOF_AUDIENCE?: string;
+      CYBERNEST_OS_PROOF_ENVIRONMENT?: string;
+      CYBERNEST_OS_PROOF_DEPLOYMENT?: string;
+      CYBERNEST_OS_ALLOWED_ORIGINS?: string;
 
       // ---------------------------------------------------------------------------------------------
       // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier

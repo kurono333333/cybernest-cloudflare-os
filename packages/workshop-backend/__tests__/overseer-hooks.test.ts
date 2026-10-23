@@ -221,7 +221,7 @@ async function makeTargetOverseer(gadgetId?: number) {
     exports: {GatekeeperHookLoopback: ({props}: {props: object}) => props},
     // The record flip (and its scope-widening check) lives in the impl; these tests cover only
     // what the interface passes to the gatekeeper-side enable().
-    impl: {enableHookRecord},
+    impl: {enableHookRecord, isCybernestPrivateRuntime: () => false},
   });
   return {client, controllerEnable, enableHookRecord};
 }

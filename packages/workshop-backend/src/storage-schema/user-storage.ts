@@ -116,6 +116,7 @@ type LibraryBlueprintRecord = {
 export type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
+  lifecycle?: "unused" | "active";
   // If we're not the gadget owner (it was shared with us), `owner` is set (inherited from
   // GadgetMetadata).
 };
@@ -202,6 +203,10 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
       // null until a Cloudflare account is connected and resolved.
       cloudflareBilling: <CloudflareBilling | null>null,
+
+      // The Manager UUID whose identity was established by the normal signed OS connection proof.
+      // This marker is written only by presentProof() after proof verification succeeds.
+      cybernestManagerProofManagerId: <string | null>null,
 
       created: false,
       profile: <AiChatAuthorInfo>{

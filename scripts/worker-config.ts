@@ -43,6 +43,8 @@ export function textModules(globs: string[]): ModuleRule[] {
 export interface WranglerExtras {
   build?: WranglerBuild;
   rules?: ModuleRule[];
+  /** Wrangler vars not yet modelled by @cloudflare/config. */
+  vars?: Record<string, string>;
   /** Emitted as `assets.directory`; requires an assets binding in `env`. */
   assetsDirectory?: string;
   /**

@@ -1,7 +1,8 @@
-import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
+import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession,
+  type RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { JWTPayload } from "jose";
-import { PublicApi, ROUTER_TAG_PROBE_PATH, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ModelKind, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, NotificationMute } from '@gadgets/workshop-shared/api';
+import { importJWK, jwtVerify, type JWK, type JWTPayload } from "jose";
+import { PublicApi, ROUTER_TAG_PROBE_PATH, AuthenticatedApi, type CybernestConnectionBootstrapApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ModelKind, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, NotificationMute } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -20,11 +21,12 @@ import { getGatewayModels } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { blueprintContentKey, buildBlueprintArchiveStream, sanitizeBlueprintOutput, parseBlueprintArchive, randomBlueprintId } from "./blueprint-archive.js";
 import { BlueprintKvRecord, listFeaturedBlueprintsFromKv, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
-import { GatekeeperConnectCallbackImpl, GatekeeperUserSelectionExchangeImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
+import { GatekeeperConnectCallbackImpl, GatekeeperUserSelectionExchangeImpl, normalizeUsername, UserDurableObject,
+  CLOUDFLARE_VENDOR_ID, type ManagerKnowledgePreflightResult } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -71,6 +73,177 @@ export { UserDirectoryDurableObject };
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl, GatekeeperUserSelectionExchangeImpl };
 
+// Private Manager-scoped capability view. The bridge only needs the installation check; the
+// User DO and the custom account keep the rest of the capability opaque and forward it unchanged.
+interface ManagerKnowledgeCapability extends WorkerEntrypoint {
+  assertBoundTo(managerId: string): Promise<"cybernest-knowledge-read-v1">;
+}
+
+interface ManagerKnowledgeBronzeWriter extends WorkerEntrypoint {
+  assertBoundTo(managerId: string):
+      | "cybernest-knowledge-bronze-write-v2"
+      | Promise<"cybernest-knowledge-bronze-write-v2">;
+  validateCandidate(input: unknown): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
+  cancel(input: unknown): Promise<unknown>;
+}
+
+interface ManagerKnowledgeGoldController extends WorkerEntrypoint {
+  assertBoundTo(managerId: string):
+      | "cybernest-knowledge-gold-job-control-v1"
+      | Promise<"cybernest-knowledge-gold-job-control-v1">;
+  inspect(): Promise<unknown>;
+  apply(input: unknown): Promise<unknown>;
+}
+
+type ManagerKnowledgeGoldPageController = WorkerEntrypoint &
+    Parameters<UserDurableObject["ensureManagerKnowledgeGoldPageRoles"]>[0];
+
+type ManagerKnowledgeSourceReaderProps = Readonly<{ managerId: string }>;
+/**
+ * Native RPC entrypoint used by Core to install a Manager-bound Knowledge account in the OS.
+ * This is intentionally separate from the HTTP Manager endpoint: Core supplies the opaque
+ * capability, and the OS never reconstructs authority from a header or a user-provided ID.
+ */
+@validateRpc()
+export class ManagerKnowledgeBridge extends WorkerEntrypoint<Env> {
+  async inspectManagerKnowledge(managerId: string): Promise<ManagerKnowledgePreflightResult> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
+      return { ok: false, code: "permission_denied" };
+    }
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    return user.inspectManagerKnowledge(managerId);
+  }
+
+  async ensureManagerKnowledge(
+    managerId: string,
+    capability: Fetcher<ManagerKnowledgeCapability>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId)) {
+      throw new TypeError("Manager ID must be a UUID.");
+    }
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok) {
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    }
+    if (preflight.value.managerId !== managerId) {
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    }
+    if (preflight.value.accountState === "bound") return;
+    if (preflight.value.accountState === "legacy" ||
+        preflight.value.accountState === "incompatible") {
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    }
+
+    const contract = await capability.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-read-v1") {
+      throw new Error("Manager Knowledge integrity_failure: incompatible reader contract.");
+    }
+    await user.ensureKnowledgeAccount(capability);
+  }
+
+  async ensureManagerKnowledgeBronzeRoles(
+    managerId: string,
+    writer: Fetcher<ManagerKnowledgeBronzeWriter>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await writer.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-bronze-write-v2")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Bronze writer contract.");
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    if (preflight.value.bronzeRoles.writer === "incompatible" ||
+        preflight.value.bronzeRoles.sourceReader === "incompatible")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Bronze role slot.");
+
+    await user.ensureManagerKnowledgeBronzeRoles(writer);
+  }
+
+  /** Installs the private Gold callback only after the canonical User and Account preflight. */
+  async ensureManagerKnowledgeGoldRoles(
+    managerId: string,
+    controller: Fetcher<ManagerKnowledgeGoldController>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await controller.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-gold-job-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    await user.ensureManagerKnowledgeGoldRoles(controller);
+  }
+
+  /** Installs the distinct owner-bound Gold page role after canonical User preflight. */
+  async ensureManagerKnowledgeGoldPageRoles(
+    managerId: string,
+    controller: Fetcher<ManagerKnowledgeGoldPageController>,
+  ): Promise<void> {
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Manager ID must be a UUID.");
+
+    const contract = await controller.assertBoundTo(managerId);
+    if (contract !== "cybernest-knowledge-gold-page-control-v1")
+      throw new Error("Manager Knowledge integrity_failure: incompatible Gold controller contract.");
+
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    const user = this.ctx.exports.UserDurableObject.get(userId);
+    const preflight = await user.inspectManagerKnowledge(managerId);
+    if (!preflight.ok)
+      throw new Error(`Manager Knowledge preflight failed: ${preflight.code}.`);
+    if (preflight.value.managerId !== managerId)
+      throw new Error("Manager Knowledge preflight failed: permission_denied.");
+    if (preflight.value.accountState !== "bound")
+      throw new Error("Manager Knowledge preflight failed: dependency_unavailable.");
+    await user.ensureManagerKnowledgeGoldPageRoles(controller);
+  }
+}
+
+/** Owner-bound metadata reader kept in a separate native capability slot from the writer. */
+@validateRpc()
+export class ManagerKnowledgeSourceReader
+  extends WorkerEntrypoint<Env, ManagerKnowledgeSourceReaderProps> {
+  async assertBoundTo(managerId: string): Promise<"cybernest-knowledge-source-read-v1"> {
+    const props = this.ctx.props;
+    if (!CYBERNEST_MANAGER_UUID.test(props.managerId) || props.managerId !== managerId)
+      throw new TypeError("Knowledge source reader is bound to another Manager.");
+    return "cybernest-knowledge-source-read-v1";
+  }
+
+  async verifySource(input: unknown): Promise<unknown> {
+    const { managerId } = this.ctx.props;
+    if (!CYBERNEST_MANAGER_UUID.test(managerId))
+      throw new TypeError("Knowledge source reader requires a Manager binding.");
+    const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+    return this.ctx.exports.UserDurableObject.get(userId)
+      .verifyManagerKnowledgeSource(managerId, input);
+  }
+}
+
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
     CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,
@@ -86,6 +259,117 @@ type Env = Cloudflare.Env & {
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
   DEV?: boolean;
   FLAGS?: Flagship;
+  // Cybernest uses the Workshop only as a private Manager-scoped Worker. The starter wrapper sets
+  // this flag and leaves no public route or workers.dev route pointing at the Workshop.
+  CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+}
+
+const CYBERNEST_MANAGER_UUID =
+    /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|f{8}-f{4}-f{4}-f{4}-f{12})$/u;
+
+function isCybernestPrivateRuntime(env: Env): boolean {
+  return env.CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
+}
+
+const CYBERNEST_OS_CONNECTION_LIFETIME_MS = 3_600_000;
+const CYBERNEST_OS_CONNECTION_PROOF_LIFETIME_SECONDS = 60;
+const CYBERNEST_OS_CONNECTION_PROOF_CLAIMS = new Set([
+  "iss", "aud", "sub", "purpose", "environment", "deployment", "iat", "exp",
+]);
+
+type CybernestConnectionProofConfig = {
+  publicJwk: JWK;
+  issuer: string;
+  audience: string;
+  environment: string;
+  deployment: string;
+  allowedOrigins: Set<string>;
+};
+
+function cybernestConnectionProofConfig(env: Env): CybernestConnectionProofConfig | null {
+  const publicJwkText = env.CYBERNEST_OS_PROOF_PUBLIC_JWK;
+  const issuer = env.CYBERNEST_OS_PROOF_ISSUER;
+  const audience = env.CYBERNEST_OS_PROOF_AUDIENCE;
+  const environment = env.CYBERNEST_OS_PROOF_ENVIRONMENT;
+  const deployment = env.CYBERNEST_OS_PROOF_DEPLOYMENT;
+  const allowedOriginsText = env.CYBERNEST_OS_ALLOWED_ORIGINS;
+  if (!publicJwkText || !issuer || !audience || !environment || !deployment ||
+      !allowedOriginsText || [issuer, audience, environment, deployment].some(value =>
+        value.trim() !== value)) {
+    return null;
+  }
+
+  try {
+    const parsedJwk: unknown = JSON.parse(publicJwkText);
+    if (parsedJwk === null || typeof parsedJwk !== "object" || Array.isArray(parsedJwk)) {
+      return null;
+    }
+    const jwk = parsedJwk as Record<string, unknown>;
+    if (jwk.kty !== "EC" || jwk.crv !== "P-256" || typeof jwk.x !== "string" ||
+        typeof jwk.y !== "string" ||
+        ["d", "p", "q", "dp", "dq", "qi", "oth", "k"].some(name => name in jwk)) {
+      return null;
+    }
+
+    const parsedOrigins: unknown = JSON.parse(allowedOriginsText);
+    if (!Array.isArray(parsedOrigins) || parsedOrigins.length === 0 ||
+        !parsedOrigins.every((origin): origin is string => typeof origin === "string" &&
+          origin.length > 0 && origin.trim() === origin)) {
+      return null;
+    }
+    const allowedOrigins = new Set<string>();
+    for (const origin of parsedOrigins) {
+      if (new URL(origin).origin !== origin) return null;
+      allowedOrigins.add(origin);
+    }
+    if (allowedOrigins.size !== parsedOrigins.length) return null;
+
+    return {
+      publicJwk: {kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y},
+      issuer,
+      audience,
+      environment,
+      deployment,
+      allowedOrigins,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function cybernestManagerIdFromConnectionProof(
+    proof: string, config: CybernestConnectionProofConfig): Promise<string | null> {
+  try {
+    const key = await importJWK(config.publicJwk, "ES256");
+    const {payload, protectedHeader} = await jwtVerify(proof, key, {
+      algorithms: ["ES256"],
+      issuer: config.issuer,
+      audience: config.audience,
+    });
+    const claims = Object.keys(payload);
+    if (claims.length !== CYBERNEST_OS_CONNECTION_PROOF_CLAIMS.size ||
+        claims.some(claim => !CYBERNEST_OS_CONNECTION_PROOF_CLAIMS.has(claim)) ||
+        Object.keys(protectedHeader).length !== 2 || protectedHeader.alg !== "ES256" ||
+        protectedHeader.typ !== "cybernest-os-connection+jwt") {
+      return null;
+    }
+
+    const {iss, aud, sub, purpose, environment, deployment, iat, exp} = payload;
+    const now = Math.floor(Date.now() / 1_000);
+    if (iss !== config.issuer || aud !== config.audience ||
+        typeof sub !== "string" || !CYBERNEST_MANAGER_UUID.test(sub) ||
+        purpose !== "os_connection" ||
+        environment !== config.environment || deployment !== config.deployment ||
+        typeof iat !== "number" || !Number.isSafeInteger(iat) ||
+        typeof exp !== "number" || !Number.isSafeInteger(exp) ||
+        iat > now || exp <= now || exp <= iat ||
+        exp - iat > CYBERNEST_OS_CONNECTION_PROOF_LIFETIME_SECONDS) {
+      return null;
+    }
+    return sub;
+  } catch {
+    return null;
+  }
 }
 
 // =======================================================================================
@@ -362,6 +646,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return result;
   }
 
+  defaultWorkspace(mode: "prepare" | "observe"): Promise<string | null> {
+    return mode === "observe"
+      ? retryOnDoReset(() => this.#user.defaultWorkspace(mode))
+      : this.#user.defaultWorkspace(mode);
+  }
+
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     return retryOnDoReset(() => this.#user.listGadgets());
   }
@@ -519,7 +809,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // 2. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, kvRecord.metadata.title);
+    await this.#user.newProvisionalGadget(id, kvRecord.metadata.title);
     let overseerResult = await this.#openGadgetInternal(id);
 
     // 3. Initialize from the blueprint's code. The Overseer reads it for itself, as the version
@@ -701,6 +991,135 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
       "Cache-Control": "public, max-age=31536000, immutable",
     },
   });
+}
+
+@validateRpc()
+class CybernestConnectionBootstrapImpl extends RpcTarget implements CybernestConnectionBootstrapApi {
+  constructor(
+      private ctx: ExecutionContext,
+      private env: Env,
+      private proofConfig: CybernestConnectionProofConfig,
+      private closeConnection: () => void) {
+    super();
+    this.#publicApi = new PublicApiImpl(ctx, env, () => {});
+  }
+
+  #publicApi: PublicApiImpl;
+  #proofAttempted = false;
+
+  getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
+    return this.#publicApi.getBlueprint(id);
+  }
+
+  downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
+    return this.#publicApi.downloadBlueprint(id);
+  }
+
+  async presentProof(proof: string): Promise<AuthenticatedApi> {
+    if (this.#proofAttempted) {
+      throw new Error("This connection has already received a proof.");
+    }
+    this.#proofAttempted = true;
+
+    const managerId = await cybernestManagerIdFromConnectionProof(proof, this.proofConfig);
+    if (managerId === null) {
+      this.closeConnection();
+      throw new Error("Invalid Cybernest OS connection proof.");
+    }
+
+    try {
+      const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
+      await this.ctx.exports.UserDurableObject.get(userId)
+          .ensureCybernestManager(managerId, true);
+      return new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {
+        this.closeConnection();
+      });
+    } catch (error) {
+      logger.warn("failed to establish Cybernest Manager session", {
+        event: "manager.connection.failed",
+        error,
+      });
+      this.closeConnection();
+      throw error;
+    }
+  }
+}
+
+function newCybernestBootstrapWebSocketResponse(
+    ctx: ExecutionContext,
+    env: Env,
+    proofConfig: CybernestConnectionProofConfig): Response {
+  const pair = new WebSocketPair();
+  const server = pair[0];
+  server.accept();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposeSession = (): void => {};
+  let finished = false;
+  const cleanup = (): void => {
+    if (finished) return;
+    finished = true;
+    if (timer !== undefined) clearTimeout(timer);
+    server.removeEventListener("close", cleanup);
+    disposeSession();
+  };
+  const closeConnection = (): void => {
+    try {
+      cleanup();
+    } finally {
+      if (server.readyState === WebSocket.OPEN) {
+        server.close(1000, "Cybernest connection lifetime ended");
+      }
+    }
+  };
+  const expireConnection = (): void => {
+    try {
+      if (server.readyState === WebSocket.OPEN) {
+        server.close(1000, "Cybernest connection lifetime ended");
+      }
+    } finally {
+      cleanup();
+    }
+  };
+  server.addEventListener("close", cleanup, {once: true});
+  timer = setTimeout(expireConnection, CYBERNEST_OS_CONNECTION_LIFETIME_MS);
+
+  try {
+    const bootstrap = new CybernestConnectionBootstrapImpl(ctx, env, proofConfig, closeConnection);
+    const session = newWebSocketRpcSession(server, bootstrap);
+    disposeSession = () => session[Symbol.dispose]();
+  } catch (error) {
+    closeConnection();
+    throw error;
+  }
+
+  return new Response(null, {
+    status: 101,
+    webSocket: pair[1],
+  });
+}
+
+async function handleCybernestPrivateRuntimeRequest(
+    req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
+
+  if (url.pathname === SITE_LOGO_PATH) return serveSiteLogo(req, env.BLUEPRINT_CONTENT);
+  if (url.pathname.startsWith(BLUEPRINT_SCREENSHOT_PATH_PREFIX)) {
+    return serveBlueprintScreenshot(env, url.pathname.slice(BLUEPRINT_SCREENSHOT_PATH_PREFIX.length));
+  }
+  if (url.pathname === "/api/client-errors") return handleClientErrorRequest(req, env, ctx);
+  if (url.pathname !== "/api") return new Response(null, {status: 404});
+  if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response(null, {status: 400});
+  }
+
+  const proofConfig = cybernestConnectionProofConfig(env);
+  if (proofConfig === null) return new Response(null, {status: 503});
+  const origin = req.headers.get("Origin");
+  if (origin === null || !proofConfig.allowedOrigins.has(origin)) {
+    return new Response(null, {status: 403});
+  }
+  return newCybernestBootstrapWebSocketResponse(ctx, env, proofConfig);
 }
 
 // Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client redeems the login
@@ -896,6 +1315,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    if (isCybernestPrivateRuntime(env)) {
+      return handleCybernestPrivateRuntimeRequest(req, env, ctx);
+    }
+
     let url = new URL(req.url);
 
     // Read on every request, off the critical path: a failure only means the next request reports

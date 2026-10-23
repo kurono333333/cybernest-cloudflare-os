@@ -115,7 +115,13 @@ function workshopConfig(
 
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
   // PUBLIC_BASE_URL mirrors run-dev-server.ts; only connect handoffs read it, as their target origin.
-  config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME], PUBLIC_BASE_URL: "http://workshop.test" };
+  // Integration suites use the standard runtime; private mode needs proof settings this harness lacks.
+  config.vars = {
+    ...config.vars,
+    ADMINS: [ADMIN_USERNAME],
+    PUBLIC_BASE_URL: "http://workshop.test",
+    CYBERNEST_PRIVATE_MANAGER_RUNTIME: "false",
+  };
 
   // Most integration tests need no Gadget execution. Keep the loader only for tests that exercise
   // executeCode or a generated Gadget server.

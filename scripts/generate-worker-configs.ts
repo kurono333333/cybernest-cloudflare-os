@@ -90,7 +90,13 @@ export async function renderWorkerConfig(dir: string): Promise<string> {
   }
 
   // Undefined extras drop out of the JSON.
-  const out = { ...config, build: extras.build, rules: extras.rules, migrations: mod.migrations };
+  const out = {
+    ...config,
+    ...(extras.vars ? { vars: {...config.vars, ...extras.vars} } : {}),
+    build: extras.build,
+    rules: extras.rules,
+    migrations: mod.migrations,
+  };
   return HEADER + JSON.stringify(out, null, 2) + "\n";
 }
 

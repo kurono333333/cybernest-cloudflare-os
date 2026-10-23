@@ -81,6 +81,7 @@ export async function openFakeOverseer(
     open: OverseerDurableObject.prototype.open,
     impl: {
       ownerId,
+      isCybernestPrivateRuntime: () => false,
       assertGatekeeperUsable: () => {},
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},

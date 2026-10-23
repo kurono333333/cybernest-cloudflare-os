@@ -65,6 +65,8 @@ export default defineGadgetsWorker({
 export const wrangler = {
   build: { command: "pnpm run build:worker", watch_dir: "src" },
   kvPreviewIds: { BLUEPRINTS: "gadgets-blueprint-metadata", AVATARS: "gadgets-avatars" },
+  // Keep Cybernest's private Manager runtime enabled for its owner-only bridge routes.
+  vars: { CYBERNEST_PRIVATE_MANAGER_RUNTIME: "true" },
 } satisfies WranglerExtras;
 
 export const migrations: DurableObjectMigration[] = [

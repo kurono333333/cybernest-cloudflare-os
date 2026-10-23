@@ -81,7 +81,12 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { isLoopLimitError, retryOnDoReset, shouldRetryAfterReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { CreationApproval, GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import {
+  CHAT_HISTORY_MAX_MESSAGES,
+  type CreationApproval,
+  type GadgetExportFormat,
+} from "@gadgets/workshop-shared/api";
+import { buildBoundedChatHistoryPage } from "./chat-history-limits.js";
 import {
   assertChatAttachmentSize,
   decodeChatAttachmentText,
@@ -1283,6 +1288,12 @@ class OverseerImpl implements AgentHooks {
     // when the previous instance went away. (A chat whose turn was just resumed drains at the end
     // of that turn instead.)
     this.drainAllPendingAgentCalls();
+  }
+
+  isCybernestPrivateRuntime(): boolean {
+    return (this.env as Cloudflare.Env & {
+      CYBERNEST_PRIVATE_MANAGER_RUNTIME?: string;
+    }).CYBERNEST_PRIVATE_MANAGER_RUNTIME === "true";
   }
 
   // =======================================================================================
@@ -10255,6 +10266,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     let isOwner = (userId == this.impl.ownerId);
 
+    if (this.impl.isCybernestPrivateRuntime() && !isOwner) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {
       this.impl.ownerProfileId = profileId;
@@ -10369,6 +10384,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async receiveExternalMessage(
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      return {
+        accepted: false,
+        message: "This Manager runtime is private, so external messages are disabled.",
+      };
+    }
+
     if (!input.prompt.trim()) {
       return { accepted: false, message: "Please include a prompt." };
     }
@@ -11051,7 +11073,8 @@ function joinSessionPresence(
 }
 
 @validateRpc()
-class OverseerClientInterface extends RpcTarget implements Overseer {
+class OverseerClientInterface extends RpcTarget
+    implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
 
   constructor(private impl: OverseerImpl,
@@ -11962,6 +11985,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .map(meta => this.impl.chatMetaForClient(meta));
   }
 
+
   async listModels(): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#clientUser.listModels(), this.impl.logger);
   }
@@ -11990,19 +12014,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let checkpoint = beforeSequence === undefined
         ? this.impl.getActiveChatCompaction(chatId)
         : this.impl.getChatCompactionBelow(chatId, beforeSequence);
-    let result = [...this.impl.storage.chats.list({
-      prefix: chatKeyPrefix(chatId),
-      start: checkpoint && chatKey(chatId, checkpoint.compactedTo),
-      end: beforeSequence === undefined ? undefined : chatKey(chatId, beforeSequence),
-    })];
-    return {
-      messages: result.map((msg) => this.#getChatMessageForClient(msg)),
-      compacted: checkpoint && {
-        to: checkpoint.compactedTo,
-        summary: checkpoint.summary,
-        proposedChange: checkpoint.proposedChange,
-      },
+    const compacted = checkpoint === undefined ? undefined : {
+      to: checkpoint.compactedTo,
+      summary: checkpoint.summary,
+      ...(checkpoint.proposedChange === undefined
+          ? {} : {proposedChange: checkpoint.proposedChange}),
     };
+
+    return buildBoundedChatHistoryPage(
+      this.impl.storage.chats.list({
+        prefix: chatKeyPrefix(chatId),
+        start: checkpoint && chatKey(chatId, checkpoint.compactedTo),
+        end: beforeSequence === undefined ? undefined : chatKey(chatId, beforeSequence),
+        limit: CHAT_HISTORY_MAX_MESSAGES + 1,
+      }),
+      compacted,
+      (message) => this.#getChatMessageForClient(message),
+    );
   }
 
   async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
@@ -12442,6 +12470,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
@@ -12464,6 +12496,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    if (this.impl.isCybernestPrivateRuntime() && keepUsers.length > 0) {
+      throw new Error("A private Manager runtime cannot keep shared users.");
+    }
+
     let affected = (await this.impl.getSharingManager())
         .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
     // Schedule the restart in the same synchronous step as the sharing mutation: the revoked
@@ -12491,6 +12527,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    if (this.impl.isCybernestPrivateRuntime() && keepUsers.length > 0) {
+      throw new Error("A private Manager runtime cannot keep shared users.");
+    }
+
     let affected = (await this.impl.getSharingManager())
         .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
     // Restart first, then best-effort cleanup, for the reasons given in removeCollaborator.
@@ -12507,11 +12547,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     return (await this.impl.getSharingManager())
         .createShareLink({ caller: this.#sharingCaller(), role, note });
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+    if (this.impl.isCybernestPrivateRuntime()) {
+      throw new Error("This Manager runtime is private and cannot be shared.");
+    }
+
     return (await this.impl.getSharingManager())
         .newShareLinkKey({ caller: this.#sharingCaller(), linkId });
   }
@@ -13385,6 +13433,15 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   constructor(private impl: OverseerImpl, private gatekeeperId: number,
               private caller: GatekeeperCaller, private hookId?: number) {
     super();
+  }
+
+  /**
+   * Private Gatekeeper-session context. The parent Overseer is the trusted workspace authority;
+   * callers cannot supply or select this identifier. This method is intentionally implemented
+   * only on the runtime queue target rather than added to the public shared ApprovalQueue API.
+   */
+  getWorkspaceId(): string {
+    return this.impl.ctx.id.toString();
   }
 
   authorizeObservation(description: ObservationDescription): Promise<void> {

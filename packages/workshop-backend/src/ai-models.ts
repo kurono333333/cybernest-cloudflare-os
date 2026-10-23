@@ -62,7 +62,7 @@ type GatewayMetadata = {
 };
 
 type GatewayMetadataContext = {
-  source: "chat" | "thread-title" | "gadget-title" | "model-binding";
+  source: "chat" | "thread-title" | "gadget-title" | "model-binding" | "conversation-organize";
   gadgetId?: string;
   chatId?: number;
 };
@@ -691,6 +691,24 @@ function getModelViaGateway(
   options: ModelRoutingOptions,
 ): ModelHandle {
   const metadata = buildMetadata(initiator, options.metadata);
+  if (config.provider === "cloudflare" && gwConfig.directWorkersAi) {
+    // Keep the pre-native-config direct REST route: it bypasses AI Gateway and therefore
+    // intentionally has no gateway attribution metadata or cost-log route.
+    const catalog = catalogModel(config.provider, config.model);
+    const model: Model<Api> = {
+      id: config.model,
+      name: catalog?.name ?? config.model,
+      api: "openai-completions",
+      provider: "cloudflare-workers-ai",
+      baseUrl: `https://api.cloudflare.com/client/v4/accounts/${gwConfig.accountId}/ai/v1`,
+      reasoning: catalog?.reasoning ?? false,
+      input: catalog?.input ?? ["text"],
+      cost: catalog?.cost ?? ZERO_COST,
+      ...modelTokenWindow(config, catalog),
+      compat: workersAiCompat(catalog),
+    };
+    return makeHandle({model, apiKey: gwConfig.apiToken, sessionAffinity: options.sessionAffinity});
+  }
   const binding = gwConfig.bindingFor(config.provider);
   // No binding means either the provider can't ride one or the deployment has none; the second
   // case already required a token in the constructor, so this only fires for the first
@@ -720,7 +738,8 @@ function getModelViaGateway(
   // and attribution metadata. Binding-routed providers address it on the binding's host, which
   // takes no account id (the binding channel carries identity); the paths are otherwise the
   // same, so the model descriptors are built identically from either root.
-  const gateway = gwConfig.gateway;
+  const gateway = config.provider === "cloudflare"
+      ? gwConfig.workersAiGateway! : gwConfig.gateway;
   const gatewayUrl = binding
       ? `https://workers-binding.ai/ai-gateway/gateways/${gateway}`
       : `${gatewayBase}/${gateway}`;

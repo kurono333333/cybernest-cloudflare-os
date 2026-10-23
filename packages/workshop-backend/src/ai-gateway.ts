@@ -78,6 +78,10 @@ export class AiGatewayConfig {
   readonly sameAccountGateway?: string;
   readonly accountId: string;
   readonly apiToken?: string;
+  /** Legacy Workers AI direct REST mode; preserves deployments that bypass AI Gateway. */
+  readonly directWorkersAi: boolean;
+  /** Optional legacy gateway override for Workers AI. */
+  readonly workersAiGateway?: string;
   /**
    * Workers AI binding, used as the gateway transport whenever present unless
    * CF_AI_GATEWAY_USE_BINDING=false opts out: binding requests are pre-authenticated in-account,
@@ -102,6 +106,17 @@ export class AiGatewayConfig {
     }
     this.accountId = env.CF_AI_GATEWAY_ACCOUNT_ID;
     this.apiToken = env.CF_AI_GATEWAY_API_TOKEN || undefined;
+    if (env.CF_AI_GATEWAY_WAI_DIRECT === "true" && env.CF_AI_GATEWAY_WAI) {
+      throw new Error(
+          "CF_AI_GATEWAY_WAI and CF_AI_GATEWAY_WAI_DIRECT cannot be configured together.");
+    }
+    this.directWorkersAi = env.CF_AI_GATEWAY_WAI_DIRECT === "true";
+    if (this.directWorkersAi && !this.apiToken) {
+      throw new Error(
+          "CF_AI_GATEWAY_API_TOKEN is required when CF_AI_GATEWAY_WAI_DIRECT is true.");
+    }
+    this.workersAiGateway = this.directWorkersAi
+      ? undefined : env.CF_AI_GATEWAY_WAI || this.gateway;
     // Normalized once, so a stray " False " opts out rather than reading as unset and silently
     // picking the other transport.
     const useBinding = env.CF_AI_GATEWAY_USE_BINDING?.trim().toLowerCase();

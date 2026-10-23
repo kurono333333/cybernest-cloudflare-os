@@ -1370,6 +1370,7 @@
         }
       },
       "vars": {
+        "CYBERNEST_PRIVATE_MANAGER_RUNTIME": "true",
         "PUBLIC_BASE_URL": "$PUBLIC_BASE_URL"
       }
     }

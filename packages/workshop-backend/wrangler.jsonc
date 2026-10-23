@@ -44,6 +44,9 @@
       "binding": "LOADER"
     }
   ],
+  "vars": {
+    "CYBERNEST_PRIVATE_MANAGER_RUNTIME": "true"
+  },
   "build": {
     "command": "pnpm run build:worker",
     "watch_dir": "src"
