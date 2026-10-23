@@ -45,7 +45,7 @@ describe('ConnectHandoffPage', () => {
   const stub = { confirmLogin } as unknown as RpcStub<PublicApi>
   const close = vi.fn<() => void>()
   // What the RpcContext provider hands the page; a reconnect replaces `stub` with a new object.
-  let provider: { stub: RpcStub<PublicApi>; connectionLost: boolean }
+  let provider: { mode: 'native'; stub: RpcStub<PublicApi>; connectionLost: boolean }
 
   beforeEach(() => {
     vi.spyOn(window, 'close').mockImplementation(close)
@@ -62,7 +62,7 @@ describe('ConnectHandoffPage', () => {
     vi.mocked(useAuth).mockClear()
     testState.isLoading = false
     testState.authenticatedApi = null
-    provider = { stub, connectionLost: false }
+    provider = { mode: 'native', stub, connectionLost: false }
     sessionStorage.clear()
     window.history.replaceState(null, '', '/')
   })
@@ -90,7 +90,7 @@ describe('ConnectHandoffPage', () => {
 
   async function render({ strict = false } = {}) {
     strictMode = strict
-    provider = { stub, connectionLost: false }
+    provider = { mode: 'native', stub, connectionLost: false }
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -257,13 +257,13 @@ describe('ConnectHandoffPage', () => {
     expect(completeConnectHandoff).toHaveBeenCalledExactlyOnceWith(TICKET, NONCE)
     expect(page.textContent).toContain('Could not complete the connection')
 
-    provider = { stub, connectionLost: true }
+    provider = { mode: 'native', stub, connectionLost: true }
     await rerender()
     expect(page.textContent).toContain('Finishing up…')
     expect(page.textContent).not.toContain('Could not complete the connection')
     expect(completeConnectHandoff).toHaveBeenCalledOnce()
 
-    provider = { stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
+    provider = { mode: 'native', stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
     signedIn()
     await rerender()
     await settle()
@@ -302,7 +302,7 @@ describe('ConnectHandoffPage', () => {
     await settle()
     expect(confirmLogin).toHaveBeenCalledOnce()
 
-    provider = { stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
+    provider = { mode: 'native', stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
     await rerender()
     await settle()
 

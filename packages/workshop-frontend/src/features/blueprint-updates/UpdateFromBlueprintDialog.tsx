@@ -8,8 +8,8 @@ import type {
   GadgetClient,
   GadgetUpstream,
   Overseer,
-  PublicApi,
 } from '@gadgets/workshop-shared/api'
+import type { BlueprintReader } from '../cybernest/connectionOwner'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from '../../components/WorkshopControls'
 import {
   fromModelSelectValue,
@@ -28,7 +28,7 @@ type UpdateFromBlueprintDialogProps = {
   /** The gadget to update. `upstream` is the blueprint it follows, which the dialog offers first. */
   gadget: { title: string; upstream?: GadgetUpstream; client: RpcStub<GadgetClient> }
   overseer: RpcStub<Overseer>
-  publicApi: RpcStub<PublicApi>
+  publicApi: BlueprintReader | null
   onClose: () => void
   /** Called with the new chat that holds the proposal, once there is one. */
   onProposed: (chatId: number) => void
@@ -120,7 +120,7 @@ export const UpdateFromBlueprintDialog = ({
     let cancelled = false
     Promise.all([
       overseer.listModels(),
-      followedId === undefined ? null : publicApi.getBlueprint(followedId),
+      followedId === undefined || !publicApi ? null : publicApi.getBlueprint(followedId),
     ]).then(([models, followed]) => {
       if (cancelled) return
       // The same choice a new chat's composer starts on, since a new chat is where this lands.
@@ -141,7 +141,7 @@ export const UpdateFromBlueprintDialog = ({
     const request = ++referenceRequest.current
     setOutcome(null)
     const blueprintId = parseBlueprintReference(text)
-    if (blueprintId === null) {
+    if (blueprintId === null || !publicApi) {
       setReference({ text, lookup: { status: text.trim() === '' ? 'empty' : 'invalid' } })
       return
     }

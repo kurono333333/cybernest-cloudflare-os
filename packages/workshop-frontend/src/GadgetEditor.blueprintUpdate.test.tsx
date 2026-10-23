@@ -89,7 +89,11 @@ vi.mock('@cloudflare/kumo', () => {
 vi.mock('./AuthContext', () => ({
   useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }),
 }))
-vi.mock('./RpcContext', () => ({ useConnectionLost: () => false, useRpcStub: () => ({}) }))
+vi.mock('./RpcContext', () => ({
+  useConnectionLost: () => false,
+  useRpcStub: () => ({}),
+  useBlueprintReader: () => null,
+}))
 vi.mock('./useWorkspaceOpen', () => ({ useWorkspaceOpen: () => mocks.workspace }))
 vi.mock('./useActions', () => ({ useActions: () => ({ pending: [] }), useActionEntries: () => {} }))
 vi.mock('./errorReporting', () => ({ reportIssue: () => {} }))

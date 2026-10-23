@@ -1,10 +1,10 @@
 import { logRpcFailure } from '../rpcErrors'
 import { useState, useEffect } from 'react'
-import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
+import { createRootRoute, Navigate, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { useRpcStub, useConnectionLost } from '../RpcContext'
+import { useConnectionLost, useCybernestSnapshot, useRpcContext } from '../RpcContext'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
 import { HANDOFF_PATH } from '../connectHandoff'
@@ -26,7 +26,10 @@ export const Route = createRootRoute({
 })
 
 function RootComponent() {
-  const rpcStub = useRpcStub()
+  const rpcContext = useRpcContext()
+  const isCybernest = rpcContext?.mode === 'cybernest'
+  const rpcStub = rpcContext?.mode === 'native' ? rpcContext.stub : undefined
+  const cybernestSnapshot = useCybernestSnapshot()
   const connectionLost = useConnectionLost()
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
@@ -37,6 +40,42 @@ function RootComponent() {
   // The connect / sign-in handoff popup needs no shell and must not wait on auth: a sign-in popup
   // has no session, and ConnectHandoffPage runs its own useAuth for connects.
   const isHandoff = pathname === HANDOFF_PATH
+
+  if (isCybernest && (isSignup || isHandoff || hasDeviceSessionParameters(window.location.search))) {
+    return <Navigate to="/" replace />
+  }
+
+  if (isCybernest && cybernestSnapshot?.status === 'connecting' && !isBlueprint) {
+    return (
+      <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
+        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-kumo-subtle">Connecting to Cybernest…</p>
+      </div>
+    )
+  }
+
+  if (isCybernest && cybernestSnapshot?.status === 'stopped' && !isBlueprint) {
+    if (cybernestSnapshot.reason === 'unauthenticated') {
+      return (
+        <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base p-6 text-center">
+          <h1 className="text-xl font-semibold text-kumo-default">Sign in to Cybernest</h1>
+          <a
+            href="/auth/login"
+            className="rounded-lg bg-kumo-brand px-4 py-2 text-sm font-medium text-kumo-inverse hover:bg-kumo-brand-hover"
+          >
+            Sign in
+          </a>
+        </div>
+      )
+    }
+    return (
+      <div className="flex min-h-full items-center justify-center bg-kumo-base p-6 text-center">
+        <p role="alert" className="text-sm text-kumo-danger">
+          Cybernest could not connect. Please try again later.
+        </p>
+      </div>
+    )
+  }
 
   // A standalone (no app shell) render is used for the handoff popup and for signed-out visitors
   // of public routes. Signed-in users get the full app chrome so public pages (esp. the blueprint
@@ -91,6 +130,8 @@ function RootComponent() {
 
   // Not authenticated and not a public route — show login
   if (!isAuthenticated && !standalone) {
+    if (isCybernest) return null
+    if (!rpcStub) return null
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
 
@@ -117,7 +158,7 @@ function RootComponent() {
   if (!authenticatedApi) return null
   // The native handoff is a dedicated destination: never render the Workshop home page
   // behind it while the browser is returning credentials to the app.
-  if (hasDeviceSessionParameters(window.location.search)) {
+  if (!isCybernest && hasDeviceSessionParameters(window.location.search)) {
     return <DeviceSessionHandoff authenticatedApi={authenticatedApi} />
   }
   return (
@@ -126,7 +167,7 @@ function RootComponent() {
         <TooltipProvider>
           <Toasty>
             <NotificationBridge authenticatedApi={authenticatedApi} />
-            <NativeAppBridge />
+            {!isCybernest && <NativeAppBridge />}
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               isWorkspaceEditor={isWorkspaceEditor}

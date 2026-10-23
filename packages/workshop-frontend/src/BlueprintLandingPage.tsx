@@ -2,7 +2,7 @@ import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
-import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { SupportedResource, VendorDescription, ResourceConfiguratorFrame, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, Robot, Sparkle, Star, Trash, X } from '@phosphor-icons/react'
@@ -26,9 +26,11 @@ import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer
 import { openConnectWindow } from './connectHandoff'
 import { requestAccountResources } from './requestAccountResources'
 import { AuthPopupCancelledError } from './features/native-app/authPopup'
+import { BlueprintReader } from './features/cybernest/connectionOwner'
+import { useRpcContext } from './RpcContext'
 
 interface Props {
-  rpcStub: RpcStub<PublicApi>
+  rpcStub: BlueprintReader
 }
 
 // Using `any` for form state to avoid complex discriminated union issues with spread.
@@ -54,11 +56,14 @@ function findSuggestedModelId(models: AiChatAuthorInfo[], suggested: {provider: 
 }
 
 export default function BlueprintLandingPage({ rpcStub }: Props) {
+  const rpcContext = useRpcContext()
+  const isCybernest = rpcContext?.mode === 'cybernest'
+  const nativePublicApi = rpcContext?.mode === 'native' ? rpcContext.stub : null
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id ?? ''
   const navigate = useNavigate()
   const router = useRouter()
-  const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
+  const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth()
   const toasts = useKumoToastManager()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
@@ -779,7 +784,18 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
 
   if (showLogin && !isAuthenticated) {
-    return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
+    if (isCybernest) {
+      return (
+        <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-kumo-base p-6 text-center">
+          <p className="text-sm text-kumo-subtle">Sign in to Cybernest to continue.</p>
+          <a href="/auth/login" className="text-sm font-medium text-kumo-brand hover:underline">
+            Sign in
+          </a>
+        </div>
+      )
+    }
+    if (!nativePublicApi) return null
+    return <LoginPage rpcStub={nativePublicApi} onLoginSuccess={handleLoginSuccess} />
   }
 
   if (loading || authLoading) {

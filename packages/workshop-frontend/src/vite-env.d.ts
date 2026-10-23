@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  // Set explicitly by the deployment build to use Core-backed Cybernest authentication.
+  readonly VITE_CYBERNEST_MODE?: string;
+
   // Override the local backend host used by Vite dev, e.g. "localhost:9000".
   readonly VITE_BACKEND_HOST?: string;
 

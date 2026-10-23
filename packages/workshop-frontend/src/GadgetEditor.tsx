@@ -17,7 +17,7 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
-import { useConnectionLost, useRpcStub } from './RpcContext'
+import { useBlueprintReader, useConnectionLost } from './RpcContext'
 import UserMenu from './components/UserMenu'
 import SiteLogo from './components/SiteLogo'
 
@@ -466,7 +466,7 @@ export default function GadgetEditor() {
   const id = params.id
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
-  const publicApi = useRpcStub()
+  const blueprintReader = useBlueprintReader()
 
   const { chat: chatParam, w: workpieceParam, showChat: showChatParam } =
     useSearch({ strict: false }) as { chat?: number; w?: number; showChat?: true }
@@ -785,7 +785,7 @@ export default function GadgetEditor() {
   const builtFromScratch = selectedGadgetSummary?.upstream !== undefined &&
     selectedGadgetSummary.upstream.blueprintId === undefined
   const blueprintUpdateAvailable =
-    useBlueprintUpdateAvailable(publicApi, selectedGadgetSummary?.upstream)
+    useBlueprintUpdateAvailable(blueprintReader, selectedGadgetSummary?.upstream)
   // A worktree has only Code; the chosen tab is remembered for the next gadget.
   const activeTab: RightTab = selectedWorkpieceSummary?.type === 'worktree' ? 'code' : chosenTab
 
@@ -2223,7 +2223,7 @@ export default function GadgetEditor() {
                 client: selectedGadgetStub,
               }}
               overseer={overseer.stub}
-              publicApi={publicApi}
+              publicApi={blueprintReader}
               onClose={() => setBlueprintUpdateDialogOpen(false)}
               onProposed={chatId => {
                 setBlueprintUpdateDialogOpen(false)
