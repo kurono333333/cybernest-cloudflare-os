@@ -172,9 +172,15 @@ export interface PublicApi extends RpcTarget {
  */
 export interface CybernestConnectionBootstrapApi extends
     RpcTarget, Pick<PublicApi, "getBlueprint" | "downloadBlueprint"> {
-  /** Validates the Manager connection proof and returns the authenticated capability for this socket. */
-  presentProof(proof: string): Promise<AuthenticatedApi>;
+  /** Validates the Manager connection proof and returns its authenticated capability and public server configuration. */
+  presentProof(proof: string): Promise<CybernestConnectionProofResult>;
 }
+
+/** Successful result of `CybernestConnectionBootstrapApi.presentProof()`. */
+export type CybernestConnectionProofResult = {
+  authenticatedApi: AuthenticatedApi;
+  serverConfig: ServerConfig;
+};
 
 /** Subscription callback for AuthenticatedApi.subscribeConnectedAccounts(). */
 export interface ConnectedAccountsSubscriber {

@@ -2,7 +2,7 @@ import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession,
   type RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { importJWK, jwtVerify, type JWK, type JWTPayload } from "jose";
-import { PublicApi, ROUTER_TAG_PROBE_PATH, AuthenticatedApi, type CybernestConnectionBootstrapApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ModelKind, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, NotificationMute } from '@gadgets/workshop-shared/api';
+import { PublicApi, ROUTER_TAG_PROBE_PATH, AuthenticatedApi, type CybernestConnectionBootstrapApi, type CybernestConnectionProofResult, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ModelKind, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, NotificationMute } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -1015,7 +1015,7 @@ class CybernestConnectionBootstrapImpl extends RpcTarget implements CybernestCon
     return this.#publicApi.downloadBlueprint(id);
   }
 
-  async presentProof(proof: string): Promise<AuthenticatedApi> {
+  async presentProof(proof: string): Promise<CybernestConnectionProofResult> {
     if (this.#proofAttempted) {
       throw new Error("This connection has already received a proof.");
     }
@@ -1031,9 +1031,11 @@ class CybernestConnectionBootstrapImpl extends RpcTarget implements CybernestCon
       const userId = this.ctx.exports.UserDurableObject.idFromName(managerId);
       await this.ctx.exports.UserDurableObject.get(userId)
           .ensureCybernestManager(managerId, true);
-      return new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {
+      const authenticatedApi = new AuthenticatedApiImpl(this.ctx, this.env, userId, () => {
         this.closeConnection();
       });
+      const serverConfig = await getServerConfig(this.env);
+      return { authenticatedApi, serverConfig };
     } catch (error) {
       logger.warn("failed to establish Cybernest Manager session", {
         event: "manager.connection.failed",
