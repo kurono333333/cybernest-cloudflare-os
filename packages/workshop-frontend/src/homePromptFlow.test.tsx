@@ -174,11 +174,11 @@ describe("Home prompt route flow", () => {
 
   it("ignores an older root's delayed observe after a newer root takes over", async () => {
     let resolveOld!: (id: string | null) => void;
-    const oldObserve = vi.fn(() => new Promise<string | null>((resolve) => { resolveOld = resolve; }));
+    const oldObserve = vi.fn<() => Promise<string | null>>(() => new Promise<string | null>((resolve) => { resolveOld = resolve; }));
     testState.authenticatedApi = { ...testState.authenticatedApi, defaultWorkspace: oldObserve };
     await mountCybernestHome();
 
-    const newObserve = vi.fn(async () => null);
+    const newObserve = vi.fn<() => Promise<string | null>>(async () => null);
     testState.authenticatedApi = { ...testState.authenticatedApi, defaultWorkspace: newObserve };
     await act(async () => root!.render(<HomePageContent />));
     expect(newObserve).toHaveBeenCalledExactlyOnceWith('observe');
@@ -217,7 +217,7 @@ describe("Home prompt route flow", () => {
 
   it("ignores a prepared workspace returned late by a replaced root", async () => {
     let resolvePrepare!: (id: string | null) => void;
-    const oldRootDefaultWorkspace = vi.fn((action: 'observe' | 'prepare') => {
+    const oldRootDefaultWorkspace = vi.fn<(action: 'observe' | 'prepare') => Promise<string | null>>((action) => {
       if (action === 'prepare') return new Promise<string | null>((resolve) => { resolvePrepare = resolve; });
       return Promise.resolve(null);
     });
@@ -228,7 +228,7 @@ describe("Home prompt route flow", () => {
     await mountCybernestHome();
     await act(async () => container!.querySelector<HTMLButtonElement>('button')!.click());
 
-    const newRootDefaultWorkspace = vi.fn(async () => null);
+    const newRootDefaultWorkspace = vi.fn<(action: 'observe' | 'prepare') => Promise<string | null>>(async () => null);
     testState.authenticatedApi = {
       ...testState.authenticatedApi,
       defaultWorkspace: newRootDefaultWorkspace,

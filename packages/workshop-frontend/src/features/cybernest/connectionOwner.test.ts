@@ -45,13 +45,13 @@ const deferred = <T,>() => {
 }
 
 function authenticatedRoot() {
-  const dispose = vi.fn()
+  const dispose = vi.fn<() => void>()
   const whoami = vi.fn<() => Promise<unknown>>()
   let root: RpcStub<AuthenticatedApi>
   root = {
     whoami,
-    onRpcBroken: vi.fn(),
-    dup: vi.fn(() => root),
+    onRpcBroken: vi.fn<RpcStub<AuthenticatedApi>['onRpcBroken']>(),
+    dup: vi.fn<RpcStub<AuthenticatedApi>['dup']>(() => root),
     [Symbol.dispose]: dispose,
   } as unknown as RpcStub<AuthenticatedApi>
   return { root, dispose, whoami }
@@ -62,13 +62,13 @@ function bootstrapSession(
   disposeBreaks = false,
 ) {
   let onBroken: ((error: unknown) => void) | undefined
-  const dispose = vi.fn(() => {
+  const dispose = vi.fn<() => void>(() => {
     if (disposeBreaks) onBroken?.(new Error('socket closed during dispose'))
   })
   const rpc = {
-    presentProof: vi.fn(presentProof),
-    getBlueprint: vi.fn(),
-    downloadBlueprint: vi.fn(),
+    presentProof: vi.fn<typeof presentProof>(presentProof),
+    getBlueprint: vi.fn<RpcStub<CybernestConnectionBootstrapApi>['getBlueprint']>(),
+    downloadBlueprint: vi.fn<RpcStub<CybernestConnectionBootstrapApi>['downloadBlueprint']>(),
     onRpcBroken: (callback: (error: unknown) => void) => { onBroken = callback },
     [Symbol.dispose]: dispose,
   } as unknown as RpcStub<CybernestConnectionBootstrapApi>
@@ -82,7 +82,7 @@ function bootstrapSession(
 }
 
 function proofResult(authenticatedApi: RpcStub<AuthenticatedApi>) {
-  const dispose = vi.fn(() => authenticatedApi[Symbol.dispose]())
+  const dispose = vi.fn<() => void>(() => authenticatedApi[Symbol.dispose]())
   const result = {
     authenticatedApi,
     serverConfig,
@@ -117,7 +117,7 @@ describe('Cybernest connection owner', () => {
     const nativeResult = deferred<NativeProofResult>()
     const session = bootstrapSession(() => nativeResult.promise)
     const fetch = vi.fn<typeof globalThis.fetch>().mockReturnValue(coreResponse.promise)
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
 
     const connecting = owner.start()
@@ -212,7 +212,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       jsonResponse(200, { proof: 'fixture-proof' }),
     )
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()
@@ -281,7 +281,7 @@ describe('Cybernest connection owner', () => {
     vi.useFakeTimers()
     const body = deferred<unknown>()
     const response = new Response(null, { status: 200 })
-    response.json = vi.fn(() => body.promise)
+    response.json = vi.fn<() => Promise<unknown>>(() => body.promise)
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(response)
     const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>()
     const owner = makeOwner(fetch, createSession)
@@ -308,7 +308,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       jsonResponse(200, { proof: 'fixture-proof' }),
     )
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
     const connecting = owner.start()
     await flushMicrotasks()
@@ -348,7 +348,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       jsonResponse(200, { proof: 'fixture-proof' }),
     )
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
 
     const connecting = owner.start()
@@ -383,7 +383,7 @@ describe('Cybernest connection owner', () => {
       .mockResolvedValueOnce(jsonResponse(200, { proof: 'proof-a' }))
       .mockReturnValueOnce(proofB.promise)
     const sessions = [sessionA, sessionB]
-    const createSession = vi.fn(() => sessions.shift()!.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => sessions.shift()!.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()
@@ -446,7 +446,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(jsonResponse(200, { proof: 'initial-proof' }))
       .mockResolvedValueOnce(jsonResponse(503, {}))
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()
@@ -477,7 +477,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
       jsonResponse(200, { proof: `proof-${fetch.mock.calls.length + 1}` }),
     )
-    const createSession = vi.fn(() => sessions.shift()!.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => sessions.shift()!.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()
@@ -519,7 +519,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
       jsonResponse(200, { proof: `proof-${fetch.mock.calls.length + 1}` }),
     )
-    const createSession = vi.fn(() => sessions.shift()!.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => sessions.shift()!.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()
@@ -563,7 +563,7 @@ describe('Cybernest connection owner', () => {
       jsonResponse(200, { proof: 'fixture-proof' }),
     )
     const sessions = [sessionA, sessionB]
-    const createSession = vi.fn(() => sessions.shift()!.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => sessions.shift()!.rpc)
     const owner = makeOwner(fetch, createSession)
 
     const startA = owner.start()
@@ -599,7 +599,7 @@ describe('Cybernest connection owner', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       jsonResponse(200, { proof: 'fixture-proof' }),
     )
-    const createSession = vi.fn(() => session.rpc)
+    const createSession = vi.fn<() => RpcStub<CybernestConnectionBootstrapApi>>(() => session.rpc)
     const owner = makeOwner(fetch, createSession)
 
     await owner.start()

@@ -356,7 +356,7 @@ function disposeProofResult(value: PresentProofResult): void {
 }
 
 function expectPresentProofResult(value: PresentProofResult): void {
-  expect(Object.keys(value).sort()).toEqual(["authenticatedApi", "serverConfig"]);
+  expect(Object.keys(value).toSorted()).toEqual(["authenticatedApi", "serverConfig"]);
 }
 
 async function presentProductApi(
