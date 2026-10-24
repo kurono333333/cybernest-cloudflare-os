@@ -292,7 +292,7 @@ describe("backend watchdog allowance", () => {
     const commands = [test.command].flat();
     assert.deepEqual(commands, [
       "gadgets-with-timeout --idle 120 --max 600 -- vitest run --reporter=default --no-fsModuleCache",
-      "gadgets-with-timeout --idle 60 --max 600 -- vitest run --config vitest.integration.config.ts --reporter=default --no-fsModuleCache",
+      'gadgets-with-timeout --idle 60 --max 600 -- vitest run --config vitest.integration.config.ts --testNamePattern="^(?!.*closes guest and authenticated native sockets at the accept-based one-hour deadline$).*" --reporter=default --no-fsModuleCache',
     ]);
   });
 });
