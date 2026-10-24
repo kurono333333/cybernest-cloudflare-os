@@ -1,5 +1,5 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
-import { env, runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
 import { generateKeyPair, importJWK, SignJWT, type JWK } from "jose";
 import {
@@ -18,6 +18,7 @@ import {
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, inject, it, vi } from "vitest";
 import { SITE_LOGO_PATH } from "../src/site-logo.js";
+import server from "../src/server";
 import type { CompactionCheckpoint } from "../src/agent";
 import { getServerConfig } from "../src/deployment-config.js";
 import type { UserDirectoryDurableObject } from "../src/user-directory";
@@ -228,10 +229,14 @@ async function openProductBootstrap(
   const headers = new Headers(options.headers);
   headers.set("Upgrade", "websocket");
   if (options.origin !== undefined) headers.set("Origin", options.origin);
-  const response = await exports.default.fetch(
+  // A service-binding fetch context ends with the upgrade response.
+  // Invoke the handler directly so the WebSocket session shares the test's execution context.
+  const response = await server.fetch(
     new Request("https://workshop.invalid/api", {
       headers,
     }),
+    env,
+    createExecutionContext(),
   );
 
   expect(response.status).toBe(101);
