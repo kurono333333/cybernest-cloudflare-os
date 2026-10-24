@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import type { RpcStub } from 'capnweb'
 import type {
   BlueprintMetadata,
   BlueprintPublicInfo,
   GadgetUpstream,
-  PublicApi,
 } from '@gadgets/workshop-shared/api'
+import type { BlueprintReader } from '../cybernest/connectionOwner'
 import { logRpcFailure } from '../../rpcErrors'
 
 /**
@@ -29,7 +28,7 @@ export const hasNewerRelease = (upstream: GadgetUpstream, blueprint: BlueprintMe
  * stays open is not noticed until then.
  */
 export const useBlueprintUpdateAvailable = (
-  publicApi: RpcStub<PublicApi>,
+  publicApi: BlueprintReader | null,
   upstream: GadgetUpstream | undefined,
 ): boolean => {
   const [followed, setFollowed] = useState<BlueprintPublicInfo | null>(null)
@@ -37,7 +36,7 @@ export const useBlueprintUpdateAvailable = (
   const takenRelease = upstream?.commitId
 
   useEffect(() => {
-    if (blueprintId === undefined || takenRelease === undefined) return
+    if (!publicApi || blueprintId === undefined || takenRelease === undefined) return
     let cancelled = false
     publicApi.getBlueprint(blueprintId).then(
       blueprint => { if (!cancelled) setFollowed(blueprint) },

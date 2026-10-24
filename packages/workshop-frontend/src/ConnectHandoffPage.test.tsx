@@ -13,18 +13,21 @@ const testState = vi.hoisted(() => ({
 }))
 
 vi.mock('./useAuth', () => ({
-  useAuth: () => ({
+  useAuth: vi.fn<typeof import('./useAuth').useAuth>(() => ({
+    token: null, error: null,
     isAuthenticated: testState.authenticatedApi !== null,
     authenticatedApi: testState.authenticatedApi,
     isLoading: testState.isLoading,
     login: vi.fn<(token: string) => void>(),
     logout: vi.fn<() => void>(),
-  }),
+  })),
 }))
 
 import ConnectHandoffPage from './ConnectHandoffPage'
+import { useAuth } from './useAuth'
 import { RpcContext } from './RpcContext'
 import { HANDOFF_KEY, HANDOFF_PATH } from './connectHandoff'
+import { NATIVE_AUTH_KEY, nativeAuthStartUrl } from './features/native-app/authPopup'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -42,7 +45,7 @@ describe('ConnectHandoffPage', () => {
   const stub = { confirmLogin } as unknown as RpcStub<PublicApi>
   const close = vi.fn<() => void>()
   // What the RpcContext provider hands the page; a reconnect replaces `stub` with a new object.
-  let provider: { stub: RpcStub<PublicApi>; connectionLost: boolean }
+  let provider: { mode: 'native'; stub: RpcStub<PublicApi>; connectionLost: boolean }
 
   beforeEach(() => {
     vi.spyOn(window, 'close').mockImplementation(close)
@@ -52,12 +55,14 @@ describe('ConnectHandoffPage', () => {
     act(() => root?.unmount())
     container?.remove()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     completeConnectHandoff.mockReset()
     confirmLogin.mockReset()
     close.mockReset()
+    vi.mocked(useAuth).mockClear()
     testState.isLoading = false
     testState.authenticatedApi = null
-    provider = { stub, connectionLost: false }
+    provider = { mode: 'native', stub, connectionLost: false }
     sessionStorage.clear()
     window.history.replaceState(null, '', '/')
   })
@@ -85,7 +90,7 @@ describe('ConnectHandoffPage', () => {
 
   async function render({ strict = false } = {}) {
     strictMode = strict
-    provider = { stub, connectionLost: false }
+    provider = { mode: 'native', stub, connectionLost: false }
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -99,6 +104,35 @@ describe('ConnectHandoffPage', () => {
   const signedIn = () => {
     testState.authenticatedApi = { completeConnectHandoff } as unknown as RpcStub<AuthenticatedApi>
   }
+
+  it('bootstraps the native browser once under StrictMode without authenticating or redeeming', async () => {
+    vi.stubGlobal('location', { origin: 'https://workshop.example' })
+    const id = 'c'.repeat(64), url = 'https://workshop.example/gatekeeper/example/connect'
+    const hash = new URL(nativeAuthStartUrl(url, id)).hash
+    const replace = vi.fn<(url: string) => void>()
+    vi.stubGlobal('location', { origin: 'https://workshop.example', hash, pathname: HANDOFF_PATH, replace })
+    const page = await render({ strict: true })
+    expect(replace).toHaveBeenCalledExactlyOnceWith(url)
+    expect(JSON.parse(sessionStorage.getItem(NATIVE_AUTH_KEY)!)).toEqual({
+      id, expiresAt: expect.any(Number),
+    })
+    expect(page.textContent).toContain('Opening sign-in')
+    expect(useAuth).not.toHaveBeenCalled()
+    expect(confirmLogin).not.toHaveBeenCalled()
+    expect(completeConnectHandoff).not.toHaveBeenCalled()
+  })
+
+  it('consumes the browser relay record once and returns the ticket without redeeming it', async () => {
+    const id = 'c'.repeat(64)
+    sessionStorage.setItem(NATIVE_AUTH_KEY, JSON.stringify({ id, expiresAt: Date.now() + 60_000 }))
+    const replace = vi.fn<(url: string) => void>()
+    vi.stubGlobal('location', { hash: '#' + TICKET, pathname: HANDOFF_PATH, replace })
+    await render({ strict: true })
+    expect(replace).toHaveBeenCalledExactlyOnceWith(`https://os.cloudflare.app/authpopup#id=${id}&ticket=${TICKET}`)
+    expect(sessionStorage.getItem(NATIVE_AUTH_KEY)).toBeNull()
+    expect(confirmLogin).not.toHaveBeenCalled()
+    expect(completeConnectHandoff).not.toHaveBeenCalled()
+  })
 
   it('redeems a connect ticket with the nonce once, strips the fragment, spends the record, and closes', async () => {
     completeConnectHandoff.mockResolvedValue(undefined)
@@ -223,13 +257,13 @@ describe('ConnectHandoffPage', () => {
     expect(completeConnectHandoff).toHaveBeenCalledExactlyOnceWith(TICKET, NONCE)
     expect(page.textContent).toContain('Could not complete the connection')
 
-    provider = { stub, connectionLost: true }
+    provider = { mode: 'native', stub, connectionLost: true }
     await rerender()
     expect(page.textContent).toContain('Finishing up…')
     expect(page.textContent).not.toContain('Could not complete the connection')
     expect(completeConnectHandoff).toHaveBeenCalledOnce()
 
-    provider = { stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
+    provider = { mode: 'native', stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
     signedIn()
     await rerender()
     await settle()
@@ -268,7 +302,7 @@ describe('ConnectHandoffPage', () => {
     await settle()
     expect(confirmLogin).toHaveBeenCalledOnce()
 
-    provider = { stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
+    provider = { mode: 'native', stub: { confirmLogin } as unknown as RpcStub<PublicApi>, connectionLost: false }
     await rerender()
     await settle()
 

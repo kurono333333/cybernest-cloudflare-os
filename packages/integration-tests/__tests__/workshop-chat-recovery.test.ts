@@ -91,7 +91,7 @@ it.concurrent("a transient provider failure is retried, and the turn answers wit
 });
 
 it.concurrent(
-    "a provider failure leaves the chat idle, retry answers once, and a busy chat refuses messages",
+    "a provider failure leaves the chat idle, retry answers once, and a busy chat refuses commands",
     async () => {
   const outage = { error: { status: 500, message: "scripted provider outage" } };
   // The turn retries the failed request twice before it reports the error.
@@ -136,13 +136,13 @@ it.concurrent(
   try {
     await ws.sendChatMessage(chatId, "Hold open", SCRIPTED_MODEL_ID);
     await waitFor("the pending model request", async () => model.requests.length === 5 || null);
-    await expect(ws.sendChatMessage(chatId, "Rejected", SCRIPTED_MODEL_ID))
-      .rejects.toThrow("Agent is running, wait for it to finish.");
+    // Plain text steers a running agent (see workshop-steering.test.ts); a command can't.
     history = await loadAllChatHistory(before => ws.getChatHistory(chatId, before));
-    expect(history).not.toContainEqual(expect.objectContaining({
-      type: "message",
-      message: "Rejected",
-    }));
+    await expect(ws.sendChatMessage(
+        chatId, { id: { builtin: true, commandId: "compact" }, args: "" }, SCRIPTED_MODEL_ID))
+      .rejects.toThrow("Agent is running, wait for it to finish.");
+    expect(await loadAllChatHistory(before => ws.getChatHistory(chatId, before)))
+      .toEqual(history);
   } finally {
     await ws.stopAgent(chatId);
   }
@@ -322,6 +322,46 @@ it.concurrent("a chat over its context budget compacts, and history pages across
   expect(tail.messages.every(message => message.sequence >= boundary)).toBe(true);
   expect(messageTexts(await loadAllChatHistory(before => ws.getChatHistory(chatId, before))))
     .toEqual(["First question", "First reply.", secondPrompt, "Second reply."]);
+});
+
+// "Discard pending changes" reverts from sequence 0, below any compaction boundary. The chat keeps
+// its summary, so the next turn does not replay the whole conversation.
+it.concurrent("discarding a compacted chat's changes keeps its summary", async () => {
+  const model = models.script([
+    { toolCall: { id: "create", name: "createGadget",
+                  arguments: { title: "Notes", bindingName: "NOTES" } } },
+    { toolCall: { id: "write", name: "writeFile",
+                  arguments: { workpiece: "NOTES", filename: "notes.txt", content: "draft\n" } } },
+    { text: "First reply.", usage: { prompt_tokens: 195_000, completion_tokens: 1, total_tokens: 195_001 } },
+    { text: "Summary of the first turn." },
+    { text: "Second reply." },
+    { text: "Third reply." },
+  ]);
+  const [owner] = nextUsernames("discardowner");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, owner!);
+  await api.addModel(model.userModel.profile, model.userModel.config);
+  using ws = await api.newGadget();
+
+  const chatId = await ws.newChat("First question", SCRIPTED_MODEL_ID);
+  await waitFor("the first turn's requests", async () => model.requests.length === 3 || null);
+  await waitForIdleChat(ws, chatId);
+  await ws.sendChatMessage(chatId, "Second question.", SCRIPTED_MODEL_ID);
+  await waitFor("the summary and resumed requests", async () => model.requests.length === 5 || null);
+  await waitForIdleChat(ws, chatId);
+  const boundary = (await ws.getChatHistory(chatId)).compacted!.to;
+
+  await ws.revertChanges(chatId, 0);
+  const tail = await ws.getChatHistory(chatId);
+  expect(tail.compacted).toMatchObject({ to: boundary, summary: "Summary of the first turn." });
+  expect(tail.compacted!.proposedChange).toBeUndefined();
+
+  await ws.sendChatMessage(chatId, "Third question.", SCRIPTED_MODEL_ID);
+  await waitFor("the third turn's request", async () => model.requests.length === 6 || null);
+  await waitForIdleChat(ws, chatId);
+  const third = JSON.stringify(model.requests[5]);
+  expect(third).toContain("Summary of the first turn.");
+  expect(third).not.toContain("First question");
 });
 
 it.concurrent("switching models keeps history, refuses a deleted model, and recovers with another",

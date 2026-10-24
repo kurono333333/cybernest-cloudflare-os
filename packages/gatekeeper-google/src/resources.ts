@@ -39,14 +39,33 @@ export const GOOGLE_DOC_RESOURCE: SupportedResource = {
   title: "Google Doc",
   description: "Read and edit documents you choose.",
   grantable: true,
+  creatable: true,
 };
 
-/** A single Google Sheet. */
+/**
+ * A single Google Sheet, read and edited with the read-write `spreadsheets` scope, which creating one
+ * (see GatekeeperVendor.createResource()) needs too.
+ */
 export const GOOGLE_SHEETS_RESOURCE: SupportedResource = {
   urlPattern: "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
   title: "Google Spreadsheet",
-  description: "Read values from a spreadsheet you choose.",
+  description:
+    "Read the values and formatting of a spreadsheet you choose, and change its values, tabs, " +
+    "rows, columns, and formatting, with your approval.",
   grantable: true,
+  creatable: true,
+};
+
+/** A single Google Slides presentation. */
+export const GOOGLE_SLIDES_RESOURCE: SupportedResource = {
+  urlPattern: "https://docs.google.com/presentation/d/:presentationId/*",
+  title: "Google Slides Presentation",
+  description:
+    "Read a presentation you choose, its slides, layouts, masters, and formatting, and, with " +
+    "your approval, edit its text and design, copy, move, or delete slides, and change its " +
+    "backgrounds and theme colours.",
+  grantable: true,
+  creatable: true,
 };
 
 /** A single Google Calendar. */
@@ -79,9 +98,12 @@ export const GOOGLE_CHAT_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
-/** One selected Google Chat space, group chat, or direct message. */
+/**
+ * One selected Google Chat space, group chat, or direct message. Chat links to a direct message
+ * under `/dm/` rather than `/room/`.
+ */
 export const GOOGLE_CHAT_SPACE_RESOURCE: SupportedResource = {
-  urlPattern: "https://chat.google.com/room/:spaceId",
+  urlPattern: "https://chat.google.com/:kind(room|dm)/:spaceId",
   title: "Google Chat Conversation",
   description:
       "Read and post in one selected conversation as you, including its members, reactions, " +
@@ -89,9 +111,12 @@ export const GOOGLE_CHAT_SPACE_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
-/** One thread in a Google Chat conversation: its first message, replies, and future replies. */
+/**
+ * One thread in a Google Chat conversation: its first message, replies, and future replies. A
+ * message's Copy link names its thread too, so a message id may follow the thread's.
+ */
 export const GOOGLE_CHAT_THREAD_RESOURCE: SupportedResource = {
-  urlPattern: "https://chat.google.com/room/:spaceId/:threadId",
+  urlPattern: "https://chat.google.com/:kind(room|dm)/:spaceId/:threadId{/:messageId}?",
   title: "Google Chat Thread",
   description:
       "Read and reply in one selected thread as you, including its reactions and attachments.",
@@ -108,18 +133,20 @@ export const BIGQUERY_RESOURCE: SupportedResource = {
 };
 
 /**
- * Files, folders, and read-only native Google Docs and Sheets available to the connected account.
+ * Files, folders, read-only native Google Docs, Sheets and Slides, and PDF text available to the
+ * connected account.
  *
  * Whole-account, not just My Drive: listings set `includeItemsFromAllDrives`, so a shared drive the
  * account belongs to is inside this grant.
  */
 export const GOOGLE_DRIVE_RESOURCE: SupportedResource = {
   urlPattern: "https://drive.google.com/drive/my-drive",
-  title: "Google Drive Account",
+  title: "Google Drive",
   description:
       "Find files and folders anywhere this Google account can read in Drive, including shared " +
       "drives. Full-text search examines indexed file content, descriptions, and OCR text; search " +
-      "results contain metadata only, while native Google Docs and Sheets can be opened read-only.",
+      "results contain metadata only, while native Google Docs, Sheets and Slides can be opened " +
+      "read-only, and PDFs can be read as text.",
   grantable: true,
 };
 
@@ -129,16 +156,20 @@ export const GOOGLE_DRIVE_FOLDER_RESOURCE: SupportedResource = {
   title: "Google Drive Folder",
   description:
       "Browse a selected folder or shared drive, search its direct children, and read native " +
-      "Google Docs and Sheets.",
+      "Google Docs, Sheets and Slides, and PDFs as text.",
   grantable: true,
+  groupedWith: GOOGLE_DRIVE_RESOURCE.urlPattern,
 };
 
-/** Metadata and, when native, read-only content for one immutable Drive file ID. */
+/** Metadata and, when native or a PDF, read-only content for one immutable Drive file ID. */
 export const GOOGLE_DRIVE_FILE_RESOURCE: SupportedResource = {
   urlPattern: "https://drive.google.com/file/d/:fileId/view",
   title: "Google Drive File",
-  description: "Read metadata and, for a native Google Doc or Sheet, content from one Drive file.",
+  description:
+      "Read metadata and, for a native Google Doc, Sheet or Slides presentation, content from one " +
+      "Drive file, or its text when it is a PDF.",
   grantable: true,
+  groupedWith: GOOGLE_DRIVE_RESOURCE.urlPattern,
 };
 
 /**
@@ -208,8 +239,16 @@ export const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] 
   {
     resource: GOOGLE_SHEETS_RESOURCE,
     scopes: [
-      "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/spreadsheets",
       // Read-only Drive file metadata, used to power the spreadsheet picker.
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ],
+  },
+  {
+    resource: GOOGLE_SLIDES_RESOURCE,
+    scopes: [
+      "https://www.googleapis.com/auth/presentations",
+      // Read-only Drive file metadata, used to power the presentation picker.
       "https://www.googleapis.com/auth/drive.metadata.readonly",
     ],
   },
@@ -224,25 +263,31 @@ export const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] 
   {
     resource: GOOGLE_DRIVE_RESOURCE,
     scopes: [
-      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      // File content, not only metadata, so a PDF can be downloaded to read its text.
+      "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ],
   },
   {
     resource: GOOGLE_DRIVE_FOLDER_RESOURCE,
     scopes: [
-      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      // File content, not only metadata, so a PDF can be downloaded to read its text.
+      "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ],
   },
   {
     resource: GOOGLE_DRIVE_FILE_RESOURCE,
     scopes: [
-      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      // File content, not only metadata, so a PDF can be downloaded to read its text.
+      "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ],
   },
   // Every Chat resource requests the same scopes: Google grants Chat authority per API, not per
@@ -277,6 +322,48 @@ export const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] 
   },
 ];
 
+/**
+ * Wider Drive grants. `drive.readonly` is requested by the Drive resources, by
+ * {@link OFFICE_IMPORT_GRANT} and by {@link SHARED_DRIVES_GRANT}; full `drive` never is, and
+ * appears only in {@link SCOPE_COVERED_BY}, where it truthfully subsumes the narrow requirements.
+ */
+const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+const DRIVE_READWRITE_SCOPE = "https://www.googleapis.com/auth/drive";
+const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+
+/**
+ * The grant that lets a connect dialog copy a Drive Office file into a native Google file:
+ * `drive.readonly` to see and read a source this OAuth client did not create, and `drive.file` to
+ * create the copy.
+ *
+ * A private grant, not a resource: it is absent from {@link SUPPORTED_RESOURCES}, so nothing lists,
+ * offers or binds it, and only the configurators' Convert button asks for it. Its scopes reach
+ * Drive content beyond any bound resource, so binding scope is enforced by the gatekeepers' code.
+ */
+export const OFFICE_IMPORT_GRANT = "https://docs.google.com/import";
+
+/**
+ * The grant that lets the Drive picker list the shared drives this account belongs to:
+ * `drives.list` accepts only `drive.readonly` or `drive`.
+ *
+ * Private, as {@link OFFICE_IMPORT_GRANT} is, and asked for only by the picker's Allow access
+ * button, so an account that never opens Shared drives is never asked for it. The picker uses it
+ * for nothing but that listing, and binding scope stays enforced by the gatekeepers' code.
+ */
+export const SHARED_DRIVES_GRANT = "https://drive.google.com/drive/shared-drives";
+
+/** Grants requested and recorded like resources, but never bindable or shown to the Workshop. */
+const PRIVATE_GRANT_SCOPES: {urlPattern: string, scopes: string[]}[] = [
+  { urlPattern: OFFICE_IMPORT_GRANT, scopes: [DRIVE_READONLY_SCOPE, DRIVE_FILE_SCOPE] },
+  { urlPattern: SHARED_DRIVES_GRANT, scopes: [DRIVE_READONLY_SCOPE] },
+];
+
+/** Every grant's scopes, resources first: what consent asks for and what coverage is checked on. */
+const GRANT_SCOPES = [
+  ...RESOURCE_SCOPES.map(({resource, scopes}) => ({urlPattern: resource.urlPattern, scopes})),
+  ...PRIVATE_GRANT_SCOPES,
+];
+
 const DRIVE_RESOURCE_PATTERNS = new Set([
   GOOGLE_DRIVE_RESOURCE.urlPattern,
   GOOGLE_DRIVE_FOLDER_RESOURCE.urlPattern,
@@ -285,21 +372,31 @@ const DRIVE_RESOURCE_PATTERNS = new Set([
 
 /** Every grantable resource, in declaration order. */
 export const SUPPORTED_RESOURCES: SupportedResource[] = RESOURCE_SCOPES.map(entry => entry.resource);
-const KNOWN_RESOURCE_PATTERNS = new Set(SUPPORTED_RESOURCES.map(resource => resource.urlPattern));
+const KNOWN_RESOURCE_PATTERNS = new Set(GRANT_SCOPES.map(entry => entry.urlPattern));
+const PRIVATE_GRANT_PATTERNS = new Set(PRIVATE_GRANT_SCOPES.map(entry => entry.urlPattern));
+
+/** Whether `pattern` is a private grant, which an account description leaves out. */
+export function isPrivateGrant(pattern: string): boolean {
+  return PRIVATE_GRANT_PATTERNS.has(pattern);
+}
+
+/**
+ * Former `urlPattern`s of live resources, so a grant recorded under one is read under its new name.
+ * Only this gatekeeper's own records are translated. The Workshop keeps a resource type's
+ * `urlPattern` elsewhere too, compared exactly: an admin's opt-out saved under a former name no
+ * longer disables the resource, and a blueprint binding saved under one finds no account for it.
+ */
+const RENAMED_RESOURCE_PATTERNS: Record<string, string> = {
+  "https://chat.google.com/room/:spaceId": GOOGLE_CHAT_SPACE_RESOURCE.urlPattern,
+  "https://chat.google.com/room/:spaceId/:threadId": GOOGLE_CHAT_THREAD_RESOURCE.urlPattern,
+};
 
 /** Whether an account's recorded grant includes any Google Drive resource. */
 export function hasDriveResourceGrant(resourceUrlPatterns: readonly string[]): boolean {
   return resourceUrlPatterns.some(pattern => DRIVE_RESOURCE_PATTERNS.has(pattern));
 }
 
-/**
- * Wider Drive grants an account may already hold. Never requested here; they appear only in
- * {@link SCOPE_COVERED_BY}, where they truthfully subsume the narrow requirements.
- */
-const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-const DRIVE_READWRITE_SCOPE = "https://www.googleapis.com/auth/drive";
-
-/** Rejects any pattern that is not a known grantable resource. */
+/** Rejects any pattern that is not a known grantable resource or private grant. */
 export function validateResourceUrlPatterns(resourceUrlPatterns: readonly string[]): void {
   let unknown = resourceUrlPatterns.filter(pattern => !KNOWN_RESOURCE_PATTERNS.has(pattern));
   if (unknown.length > 0) {
@@ -307,13 +404,13 @@ export function validateResourceUrlPatterns(resourceUrlPatterns: readonly string
   }
 }
 
-/** The OAuth scopes required by the explicit grantable resource `urlPattern`s. */
+/** The OAuth scopes required by the explicit grantable resource and private grant `urlPattern`s. */
 export function resourceUrlPatternsToOAuthScopes(resourceUrlPatterns: readonly string[]): string[] {
   validateResourceUrlPatterns(resourceUrlPatterns);
 
   let scopes = new Set<string>(IDENTITY_SCOPES);
-  for (let entry of RESOURCE_SCOPES) {
-    if (resourceUrlPatterns.includes(entry.resource.urlPattern)) {
+  for (let entry of GRANT_SCOPES) {
+    if (resourceUrlPatterns.includes(entry.urlPattern)) {
       for (let scope of entry.scopes) scopes.add(scope);
     }
   }
@@ -337,6 +434,12 @@ const SCOPE_COVERED_BY: Record<string, readonly string[]> = {
   "https://www.googleapis.com/auth/spreadsheets.readonly": [
     "https://www.googleapis.com/auth/spreadsheets", DRIVE_READONLY_SCOPE, DRIVE_READWRITE_SCOPE,
   ],
+  "https://www.googleapis.com/auth/presentations.readonly": [
+    "https://www.googleapis.com/auth/presentations", DRIVE_READONLY_SCOPE, DRIVE_READWRITE_SCOPE,
+  ],
+  "https://www.googleapis.com/auth/spreadsheets": [DRIVE_READWRITE_SCOPE],
+  [DRIVE_READONLY_SCOPE]: [DRIVE_READWRITE_SCOPE],
+  [DRIVE_FILE_SCOPE]: [DRIVE_READWRITE_SCOPE],
   "https://www.googleapis.com/auth/chat.spaces.readonly": [
     "https://www.googleapis.com/auth/chat.spaces",
   ],
@@ -367,10 +470,10 @@ export function resourcesCoveredByScopes(
     grantedOAuthScopes: readonly string[]): string[] {
   let granted = new Set(grantedOAuthScopes);
   let requested = new Set(resourceUrlPatterns);
-  return RESOURCE_SCOPES
-      .filter(entry => requested.has(entry.resource.urlPattern) &&
+  return GRANT_SCOPES
+      .filter(entry => requested.has(entry.urlPattern) &&
                        entry.scopes.every(scope => oauthScopeCovers(scope, granted)))
-      .map(entry => entry.resource.urlPattern);
+      .map(entry => entry.urlPattern);
 }
 
 /**
@@ -402,12 +505,15 @@ export type RecordedResourceGrant = {
  * accepted. That generation cannot express an outgrown grant either — a resource whose scopes it no
  * longer covers is indistinguishable from one it never held — so there is nothing to keep.
  *
- * A `urlPattern` a later deploy retired is dropped rather than returned: it maps to no scopes, so
- * requesting it would throw and take the reconnect that repairs the account down with it.
+ * A `urlPattern` a later deploy renamed is read under its new name. One it retired is dropped: it
+ * maps to no scopes, so requesting it would throw and take the reconnect that repairs the account
+ * down with it.
  */
 export function recordedResourceUrlPatterns(grant: RecordedResourceGrant): string[] {
   if (grant.resourceUrlPatterns !== undefined) {
-    return grant.resourceUrlPatterns.filter(pattern => KNOWN_RESOURCE_PATTERNS.has(pattern));
+    return grant.resourceUrlPatterns
+        .map(pattern => RENAMED_RESOURCE_PATTERNS[pattern] ?? pattern)
+        .filter(pattern => KNOWN_RESOURCE_PATTERNS.has(pattern));
   }
   if (grant.oauthScopes === undefined) return [...LEGACY_GRANTED_RESOURCE_URL_PATTERNS];
   return resourcesCoveredByScopes(SCOPE_DERIVED_RESOURCE_URL_PATTERNS, grant.oauthScopes);
@@ -429,6 +535,7 @@ export type ResourceTarget =
   | { kind: "gmail"; searchQuery?: string; labelName?: string }
   | { kind: "doc"; documentId: string }
   | { kind: "sheets"; spreadsheetId: string }
+  | { kind: "slides"; presentationId: string }
   | { kind: "calendar"; calendarId: string; availabilityMode: CalendarAvailabilityMode }
   | { kind: "bigquery"; projectId: string; datasetId?: string; tableId?: string }
   | { kind: "driveAccount" }
@@ -443,6 +550,7 @@ export const RESOURCE_BY_KIND: Record<ResourceTarget["kind"], SupportedResource>
   gmail: GMAIL_RESOURCE,
   doc: GOOGLE_DOC_RESOURCE,
   sheets: GOOGLE_SHEETS_RESOURCE,
+  slides: GOOGLE_SLIDES_RESOURCE,
   calendar: GOOGLE_CALENDAR_RESOURCE,
   bigquery: BIGQUERY_RESOURCE,
   driveAccount: GOOGLE_DRIVE_RESOURCE,
@@ -452,6 +560,30 @@ export const RESOURCE_BY_KIND: Record<ResourceTarget["kind"], SupportedResource>
   chatSpace: GOOGLE_CHAT_SPACE_RESOURCE,
   chatThread: GOOGLE_CHAT_THREAD_RESOURCE,
 };
+
+/** The resource kinds createResource() can make: Google's native editor files. */
+export type CreatableKind = "doc" | "sheets" | "slides";
+const NATIVE_FILE_PATHS: Record<CreatableKind, string> =
+    { doc: "document", sheets: "spreadsheets", slides: "presentation" };
+const CREATABLE_KINDS = Object.keys(NATIVE_FILE_PATHS) as CreatableKind[];
+
+/** The kind of the creatable resource type `resourceUrlPattern`, or an agent-readable refusal. */
+export function creatableKind(resourceUrlPattern: string): CreatableKind {
+  let kind = CREATABLE_KINDS.find(candidate => {
+    let resource = RESOURCE_BY_KIND[candidate];
+    return resource.urlPattern === resourceUrlPattern && resource.creatable;
+  });
+  if (kind) return kind;
+  let types = CREATABLE_KINDS.map(candidate =>
+      `${RESOURCE_BY_KIND[candidate].title} (${RESOURCE_BY_KIND[candidate].urlPattern})`);
+  throw new Error(`Google can create only these resource types: ${types.join(", ")}.`);
+}
+
+/** A native file's canonical URL; with no `id`, its product's home page (a file not yet created). */
+export function nativeFileUrl(kind: CreatableKind, id?: string): string {
+  let base = `https://docs.google.com/${NATIVE_FILE_PATHS[kind]}/`;
+  return id === undefined ? base : `${base}d/${id}/edit`;
+}
 
 /**
  * Parses a bound resource URL into the target its gatekeeper needs.
@@ -524,7 +656,7 @@ function parseGmailUrl(parsed: URL): ResourceTarget {
 }
 
 function parseDocsUrl(parsed: URL): ResourceTarget {
-  // Both forms are /<type>/d/<id>/..., so the id is always the third segment.
+  // Every form is /<type>/d/<id>/..., so the id is always the third segment.
   let id = parsed.pathname.split("/")[3];
   if (parsed.pathname.startsWith("/document/d/")) {
     if (!id) throw new Error("Invalid Google Docs URL: no document ID found");
@@ -533,6 +665,10 @@ function parseDocsUrl(parsed: URL): ResourceTarget {
   if (parsed.pathname.startsWith("/spreadsheets/d/")) {
     if (!id) throw new Error("Invalid Google Sheets URL: no spreadsheet ID found");
     return { kind: "sheets", spreadsheetId: id };
+  }
+  if (parsed.pathname.startsWith("/presentation/d/")) {
+    if (!id) throw new Error("Invalid Google Slides URL: no presentation ID found");
+    return { kind: "slides", presentationId: id };
   }
   throw new Error(`Unsupported Google Docs resource URL: ${describeUrl(parsed)}`);
 }
@@ -571,22 +707,26 @@ function parseDriveUrl(parsed: URL): ResourceTarget {
 /**
  * Chat's own URLs carry a view path and a fragment, so the grant is keyed on the canonical form
  * the configurator mints: the bare host for the whole account, `/room/{space}` for one
- * conversation, `/room/{space}/{thread}` for one thread. The ids are Chat's without their
- * `spaces/` and `threads/` prefixes, validated here because every downstream request
- * interpolates them into a path.
+ * conversation, `/room/{space}/{thread}` for one thread. A link Chat gives out to one of those
+ * spells a direct message's `/room/` as `/dm/` and adds a `cls` view parameter, which names no
+ * resource and is ignored, as is the message id that follows the thread's in a message's link; any
+ * other query, or a fragment, is refused rather than guessed at. The ids are Chat's without their
+ * `spaces/` and `threads/` prefixes, validated here because every downstream request interpolates
+ * them into a path.
  */
 function parseChatUrl(parsed: URL): ResourceTarget {
-  if (parsed.search || parsed.hash) {
-    throw new Error("Google Chat resource URLs must not include query strings or fragments.");
+  if (parsed.hash || [...parsed.searchParams.keys()].some(key => key !== "cls")) {
+    throw new Error(
+        "Google Chat resource URLs must not include fragments or query parameters other than cls.");
   }
   if (/^\/?$/.test(parsed.pathname)) return { kind: "chatAccount" };
 
-  let room = /^\/room\/([^/]+)\/?$/.exec(parsed.pathname);
+  let room = /^\/(?:room|dm)\/([^/]+)\/?$/.exec(parsed.pathname);
   if (room) {
     return { kind: "chatSpace", spaceId: validateChatSpaceId(decodeURIComponent(room[1])) };
   }
 
-  let thread = /^\/room\/([^/]+)\/([^/]+)\/?$/.exec(parsed.pathname);
+  let thread = /^\/(?:room|dm)\/([^/]+)\/([^/]+)(?:\/[^/]+)?\/?$/.exec(parsed.pathname);
   if (thread) {
     return {
       kind: "chatThread",

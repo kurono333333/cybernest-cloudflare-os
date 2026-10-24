@@ -68,7 +68,7 @@ describe('root route standalone rendering', () => {
     root = createRoot(container)
     await act(async () => {
       root!.render(
-        <RpcContext.Provider value={{ stub, connectionLost: false }}>
+        <RpcContext.Provider value={{ mode: 'native', stub, connectionLost: false }}>
           <RootComponent />
         </RpcContext.Provider>,
       )

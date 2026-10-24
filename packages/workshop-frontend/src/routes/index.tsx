@@ -1,11 +1,13 @@
 import { classifyRpcError, logRpcFailure, rpcFailureDescription } from "../rpcErrors";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
 import { ChatComposer } from "../features/chat/composer/ChatComposer";
 import MeshBackground from "../components/MeshBackground";
 import HomeTaskSuggestions from "../components/AppShell/HomeTaskSuggestions";
+import { UpdateAvailableNotice } from "../features/deployment-updates/UpdateAvailableNotice";
 import { useAuthenticatedApi } from "../AuthContext";
+import { useRpcContext } from "../RpcContext";
 import { RpcStub } from "capnweb";
 import {
   Overseer,
@@ -23,12 +25,20 @@ import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
-type HomeSearch = { prompt?: string };
+type HomeSearch = {
+  prompt?: string;
+  cfos_native_state?: string;
+  cfos_native_key?: string;
+};
 
 export const Route = createFileRoute("/")({
   component: HomePage,
   validateSearch: (search: Record<string, unknown>): HomeSearch => ({
     prompt: homePromptFromSearch(search.prompt),
+    cfos_native_state: typeof search.cfos_native_state === "string"
+      ? search.cfos_native_state : undefined,
+    cfos_native_key: typeof search.cfos_native_key === "string"
+      ? search.cfos_native_key : undefined,
   }),
 });
 
@@ -41,6 +51,13 @@ function HomePage() {
 
 export function HomePageContent({ prompt }: HomeSearch) {
   useDocumentTitle("Home");
+  const rpcContext = useRpcContext()
+  return rpcContext?.mode === 'cybernest'
+    ? <CybernestHomePage />
+    : <NativeHomePageContent prompt={prompt} />
+}
+
+function NativeHomePageContent({ prompt }: HomeSearch) {
 
   const { authenticatedApi, currentUser } = useAuthenticatedApi();
   const navigate = useNavigate();
@@ -159,6 +176,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
     // Flat enterprise treatment: no mesh, no watermark hexagon, no prompt-glow. The AppShell's
     // <main> already supplies a faint dotted grid as the page background.
     <div className="relative isolate flex min-h-full w-full flex-col items-center justify-start px-4 pb-16 pt-10 sm:px-8 sm:pt-16 lg:pt-24">
+      <UpdateAvailableNotice />
       {/* The brand hex mesh, restored and de-warmed for the new system: a gentle perspective hex
           grid receding upward. Masked to fade out before the composer so it stays a quiet backdrop. */}
       <div
@@ -213,4 +231,99 @@ export function HomePageContent({ prompt }: HomeSearch) {
       </div>
     </div>
   );
+}
+
+function CybernestHomePage() {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const navigate = useNavigate()
+  const [state, setState] = useState<'loading' | 'empty' | 'preparing' | 'unknown'>('loading')
+  const prepareAttemptedRef = useRef(false)
+  const operationGenerationRef = useRef(0)
+
+  const observeDefaultWorkspace = useCallback(async (afterPrepare = false) => {
+    const api = authenticatedApi
+    const generation = ++operationGenerationRef.current
+    setState('loading')
+    try {
+      const id = await api.defaultWorkspace('observe')
+      if (generation !== operationGenerationRef.current) return
+      if (id) {
+        await navigate({ to: '/workspace/$id', params: { id }, search: {} })
+      } else {
+        setState(afterPrepare ? 'unknown' : 'empty')
+      }
+    } catch {
+      if (generation !== operationGenerationRef.current) return
+      setState('unknown')
+    }
+  }, [authenticatedApi, navigate])
+
+  useLayoutEffect(() => {
+    prepareAttemptedRef.current = false
+    operationGenerationRef.current++
+    return () => {
+      operationGenerationRef.current++
+    }
+  }, [authenticatedApi])
+
+  useEffect(() => {
+    void observeDefaultWorkspace()
+  }, [observeDefaultWorkspace])
+
+  const prepareDefaultWorkspace = async () => {
+    if (prepareAttemptedRef.current) return
+    prepareAttemptedRef.current = true
+    const api = authenticatedApi
+    const generation = ++operationGenerationRef.current
+    setState('preparing')
+    try {
+      const id = await api.defaultWorkspace('prepare')
+      if (generation !== operationGenerationRef.current) return
+      if (id) {
+        await navigate({ to: '/workspace/$id', params: { id }, search: {} })
+        return
+      }
+    } catch {
+      if (generation !== operationGenerationRef.current) return
+      // An uncertain prepare is followed only by a read-only observation.
+    }
+    await observeDefaultWorkspace(true)
+  }
+
+  return (
+    <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-kumo-base p-6 text-center">
+      {state === 'loading' || state === 'preparing' ? (
+        <>
+          <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-kumo-subtle">
+            {state === 'preparing' ? 'Preparing your workspace…' : 'Opening your workspace…'}
+          </p>
+        </>
+      ) : state === 'empty' ? (
+        <>
+          <p className="text-sm text-kumo-subtle">No workspace is ready yet.</p>
+          <button
+            type="button"
+            onClick={() => void prepareDefaultWorkspace()}
+            className="rounded-lg bg-kumo-brand px-4 py-2 text-sm font-medium text-kumo-inverse hover:bg-kumo-brand-hover"
+          >
+            Prepare workspace
+          </button>
+        </>
+      ) : (
+        <>
+          <p role="alert" className="text-sm text-kumo-danger">
+            Workspace status is uncertain. Check again before preparing another workspace.
+          </p>
+          <button
+            type="button"
+            onClick={() => void observeDefaultWorkspace(prepareAttemptedRef.current)}
+            className="rounded-lg border border-kumo-line px-4 py-2 text-sm font-medium text-kumo-default hover:bg-kumo-tint"
+          >
+            Check workspace
+          </button>
+        </>
+      )}
+    </div>
+  )
 }

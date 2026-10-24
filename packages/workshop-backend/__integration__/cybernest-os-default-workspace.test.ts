@@ -27,6 +27,7 @@ type WorkspaceStub = Awaited<ReturnType<AuthenticatedApi["newGadget"]>>;
 
 type Session<T extends RpcTarget = AuthenticatedApi> = {
   api: RpcStub<T>;
+  bootstrapApi?: RpcStub<CybernestConnectionBootstrapApi>;
   socket: WebSocket;
 };
 
@@ -36,6 +37,9 @@ type RpcOutcome<T> =
   | { status: "timeout" };
 
 const managerId = (): string => crypto.randomUUID();
+type PresentProofResult = Awaited<
+  ReturnType<RpcStub<CybernestConnectionBootstrapApi>["presentProof"]>
+>;
 
 function isPrivateEs256Jwk(value: unknown): value is JWK {
   if (typeof value !== "object" || value === null) return false;
@@ -94,8 +98,8 @@ async function openBootstrap(): Promise<Session<CybernestConnectionBootstrapApi>
 async function connectNative(id: string): Promise<Session> {
   const bootstrap = await openBootstrap();
   try {
-    const api = await bootstrap.api.presentProof(await connectionProof(id));
-    return { api, socket: bootstrap.socket };
+    const api = await presentProductApi(bootstrap.api, await connectionProof(id));
+    return { api, bootstrapApi: bootstrap.api, socket: bootstrap.socket };
   } catch (error) {
     bootstrap.api[Symbol.dispose]();
     bootstrap.socket.close();
@@ -105,7 +109,27 @@ async function connectNative(id: string): Promise<Session> {
 
 function close<T extends RpcTarget>(session: Session<T>): void {
   session.api[Symbol.dispose]();
+  session.bootstrapApi?.[Symbol.dispose]();
   session.socket.close();
+}
+
+async function presentProductProof(
+  bootstrapApi: RpcStub<CybernestConnectionBootstrapApi>,
+  proof: string,
+): Promise<PresentProofResult> {
+  return await bootstrapApi.presentProof(proof);
+}
+
+async function presentProductApi<T extends CybernestConnectionBootstrapApi>(
+  bootstrapApi: RpcStub<T>,
+  proof: string,
+): Promise<RpcStub<AuthenticatedApi>> {
+  const result = await presentProductProof(bootstrapApi, proof);
+  try {
+    return result.authenticatedApi.dup();
+  } finally {
+    result[Symbol.dispose]();
+  }
 }
 
 function userStorage(instance: UserDurableObject): Pick<UserStorage, "gadgets"> {
@@ -503,7 +527,10 @@ describe("atomic default workspace on the native OS Worker", () => {
     let bootstrapDisposed = false;
 
     try {
-      api = await bootstrapApi.presentProof(await connectionProof(id));
+      api = await presentProductApi(
+        bootstrapApi,
+        await connectionProof(id),
+      );
       // The proof response completed before the only pending request; hold opaque downstream
       // frames from this point without decoding or modifying the native RPC protocol.
       holdDownlink = true;

@@ -1,5 +1,5 @@
 import { exports, RpcStub as NativeRpcStub } from "cloudflare:workers";
-import { env, runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
 import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
 import { generateKeyPair, importJWK, SignJWT, type JWK } from "jose";
 import {
@@ -13,11 +13,14 @@ import {
   type CybernestConnectionBootstrapApi,
   type GadgetMetadataWithTimestamps,
   type Overseer,
+  type PublicApi,
 } from "@gadgets/workshop-shared/api";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import { describe, expect, inject, it, vi } from "vitest";
 import { SITE_LOGO_PATH } from "../src/site-logo.js";
+import server from "../src/server";
 import type { CompactionCheckpoint } from "../src/agent";
+import { getServerConfig } from "../src/deployment-config.js";
 import type { UserDirectoryDurableObject } from "../src/user-directory";
 
 declare module "vitest" {
@@ -38,13 +41,19 @@ const TEST_SCREENSHOT_BYTES = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 
 
 type Session<T extends RpcTarget = AuthenticatedApi> = {
   api: RpcStub<T>;
+  bootstrapApi?: RpcStub<CybernestConnectionBootstrapApi>;
   socket?: WebSocket;
   closeAt?: Promise<number>;
 };
 
 type ProductBootstrapApi = CybernestConnectionBootstrapApi;
+type PresentProofResult = Awaited<
+  ReturnType<RpcStub<ProductBootstrapRootProbeApi>["presentProof"]>
+>;
 
-type ProductBootstrapRootProbeApi = ProductBootstrapApi & Pick<AuthenticatedApi, "whoami">;
+type ProductBootstrapRootProbeApi = ProductBootstrapApi &
+  Pick<AuthenticatedApi, "whoami"> &
+  Pick<PublicApi, "ping" | "getServerConfig">;
 
 type ConnectionProofOverrides = {
   issuer?: string;
@@ -220,10 +229,14 @@ async function openProductBootstrap(
   const headers = new Headers(options.headers);
   headers.set("Upgrade", "websocket");
   if (options.origin !== undefined) headers.set("Origin", options.origin);
-  const response = await exports.default.fetch(
+  // A service-binding fetch context ends with the upgrade response.
+  // Invoke the handler directly so the WebSocket session shares the test's execution context.
+  const response = await server.fetch(
     new Request("https://workshop.invalid/api", {
       headers,
     }),
+    env,
+    createExecutionContext(),
   );
 
   expect(response.status).toBe(101);
@@ -246,8 +259,8 @@ async function openProductBootstrap(
 async function connectProductNative(id: string): Promise<Session> {
   const bootstrap = await openProductBootstrap({ origin: TEST_ALLOWED_ORIGIN });
   try {
-    const api = await bootstrap.api.presentProof(await connectionProof(id));
-    return { socket: bootstrap.socket, api };
+    const api = await presentProductApi(bootstrap.api, await connectionProof(id));
+    return { socket: bootstrap.socket, api, bootstrapApi: bootstrap.api };
   } catch (error) {
     close(bootstrap);
     throw error;
@@ -332,7 +345,35 @@ async function dropDirectoryFailureTrigger(id: string): Promise<void> {
 
 function close<T extends RpcTarget>(session: Session<T>): void {
   session.api[Symbol.dispose]();
+  session.bootstrapApi?.[Symbol.dispose]();
   session.socket?.close();
+}
+
+async function presentProductProof(
+  bootstrapApi: RpcStub<ProductBootstrapRootProbeApi>,
+  proof: string,
+): Promise<PresentProofResult> {
+  return await bootstrapApi.presentProof(proof);
+}
+
+function disposeProofResult(value: PresentProofResult): void {
+  value[Symbol.dispose]();
+}
+
+function expectPresentProofResult(value: PresentProofResult): void {
+  expect(Object.keys(value).toSorted()).toEqual(["authenticatedApi", "serverConfig"]);
+}
+
+async function presentProductApi(
+  bootstrapApi: RpcStub<ProductBootstrapRootProbeApi>,
+  proof: string,
+): Promise<RpcStub<AuthenticatedApi>> {
+  const result = await presentProductProof(bootstrapApi, proof);
+  try {
+    return result.authenticatedApi.dup();
+  } finally {
+    disposeProofResult(result);
+  }
 }
 
 async function expectValidatorRejection(call: Promise<unknown>): Promise<void> {
@@ -513,7 +554,7 @@ describe("Cybernest Manager runtime", () => {
       try {
         await expectValidatorRejection(bootstrap.api.whoami());
         await expect(
-          bootstrap.api.presentProof(await connectionProof(id, proofOverrides)),
+          presentProductProof(bootstrap.api, await connectionProof(id, proofOverrides)),
         ).rejects.toThrow();
         await Promise.resolve();
         expect(bootstrap.socket?.readyState).toBe(WebSocket.CLOSED);
@@ -526,6 +567,75 @@ describe("Cybernest Manager runtime", () => {
     },
   );
 
+  it("returns the native proof result only after proof and releases its API separately from the socket", async () => {
+    const deniedId = managerId();
+    const denied = await openProductBootstrap({ origin: TEST_ALLOWED_ORIGIN });
+
+    try {
+      await expectValidatorRejection(denied.api.whoami());
+      await expectValidatorRejection(denied.api.getServerConfig());
+      await expectValidatorRejection(denied.api.ping());
+      await expect(denied.api.getBlueprint("missing-before-proof")).resolves.toBeNull();
+      await expect(denied.api.downloadBlueprint("missing-before-proof"))
+        .rejects.toThrow("Blueprint not found.");
+      await expect(
+        presentProductProof(denied.api, await connectionProof(deniedId, { wrongSignature: true })),
+      ).rejects.toThrow();
+      await expect(managerProfile(deniedId)).resolves.toBeNull();
+      expect(denied.socket?.readyState).toBe(WebSocket.CLOSED);
+    } finally {
+      close(denied);
+    }
+
+    const id = managerId();
+    const bootstrap = await openProductBootstrap({ origin: TEST_ALLOWED_ORIGIN });
+    let result: PresentProofResult | undefined;
+    let retainedApi: RpcStub<AuthenticatedApi> | undefined;
+
+    try {
+      const expectedConfig = await getServerConfig(env);
+      result = await presentProductProof(bootstrap.api, await connectionProof(id));
+
+      expectPresentProofResult(result);
+      expect(result.serverConfig).toStrictEqual(expectedConfig);
+      const authenticatedApi = result.authenticatedApi;
+      await expect(authenticatedApi.whoami()).resolves.toMatchObject({ type: "user", id });
+      await expect(managerProfile(id)).resolves.toMatchObject({ type: "user", id });
+      await expect(authenticatedApi.listGadgets()).resolves.toEqual([]);
+      await expect(authenticatedApi.defaultWorkspace("observe")).resolves.toBeNull();
+      await expect(authenticatedApi.listGadgets()).resolves.toEqual([]);
+
+      const workspaceId = await authenticatedApi.defaultWorkspace("prepare");
+      expect(workspaceId).toEqual(expect.any(String));
+      await expect(authenticatedApi.listGadgets()).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: workspaceId, lifecycle: "unused" }),
+        ]),
+      );
+
+      retainedApi = authenticatedApi.dup();
+      disposeProofResult(result);
+      result = undefined;
+      expect(bootstrap.socket?.readyState).toBe(WebSocket.OPEN);
+      await expect(retainedApi.whoami()).resolves.toMatchObject({ type: "user", id });
+      retainedApi[Symbol.dispose]();
+      retainedApi = undefined;
+      expect(bootstrap.socket?.readyState).toBe(WebSocket.OPEN);
+
+      await expectValidatorRejection(bootstrap.api.getServerConfig());
+      await expectValidatorRejection(bootstrap.api.ping());
+      await expect(bootstrap.api.getBlueprint("missing-after-proof")).resolves.toBeNull();
+      await expect(bootstrap.api.downloadBlueprint("missing-after-proof"))
+        .rejects.toThrow("Blueprint not found.");
+    } finally {
+      retainedApi?.[Symbol.dispose]();
+      if (result !== undefined) disposeProofResult(result);
+      bootstrap.api[Symbol.dispose]();
+      bootstrap.socket?.close();
+      if (bootstrap.closeAt) await waitForSocketClose(bootstrap.closeAt, 2_000);
+    }
+  });
+
   it("does not let a second valid proof switch the identity of one native connection", async () => {
     const managerA = managerId();
     const managerB = managerId();
@@ -533,10 +643,20 @@ describe("Cybernest Manager runtime", () => {
     let rootA: RpcStub<AuthenticatedApi> | undefined;
 
     try {
-      rootA = await bootstrap.api.presentProof(await connectionProof(managerA));
+      const proofResult = await presentProductProof(
+        bootstrap.api,
+        await connectionProof(managerA),
+      );
+      try {
+        rootA = proofResult.authenticatedApi.dup();
+      } finally {
+        disposeProofResult(proofResult);
+      }
       await expect(rootA.whoami()).resolves.toMatchObject({ id: managerA });
 
-      await expect(bootstrap.api.presentProof(await connectionProof(managerB))).rejects.toThrow();
+      await expect(
+        presentProductProof(bootstrap.api, await connectionProof(managerB)),
+      ).rejects.toThrow();
       await Promise.resolve();
       await expect(managerProfile(managerB)).resolves.toBeNull();
 
@@ -933,7 +1053,15 @@ describe("Cybernest Manager runtime", () => {
     try {
       await expectValidatorRejection(guest.api.whoami());
       await new Promise((resolve) => setTimeout(resolve, 30_000));
-      root = await authenticated.api.presentProof(await connectionProof(manager));
+      const proofResult = await presentProductProof(
+        authenticated.api,
+        await connectionProof(manager),
+      );
+      try {
+        root = proofResult.authenticatedApi.dup();
+      } finally {
+        disposeProofResult(proofResult);
+      }
       await expect(root.whoami()).resolves.toMatchObject({ id: manager });
       workspace = await root.newGadget();
       const metadata = await workspace.getMetadata();
@@ -1008,7 +1136,7 @@ describe("Cybernest Manager runtime", () => {
       expect(deadlineTimerIndex).toBeGreaterThanOrEqual(0);
       const deadlineTimer = setTimeoutSpy.mock.results[deadlineTimerIndex]?.value;
 
-      await expect(bootstrap.api.presentProof("not-a-jws")).rejects.toThrow();
+      await expect(presentProductProof(bootstrap.api, "not-a-jws")).rejects.toThrow();
       await Promise.resolve();
       expect(socket.readyState).toBe(WebSocket.CLOSED);
       expect(clearTimeoutSpy).toHaveBeenCalledWith(deadlineTimer);

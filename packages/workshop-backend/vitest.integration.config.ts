@@ -1,4 +1,4 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { exportJWK, generateKeyPair } from "jose";
 import capnwebValidate from "capnweb-validate/vite";
 import { kCurrentWorker } from "miniflare";
@@ -10,7 +10,7 @@ declare module "vitest" {
   }
 }
 
-const {privateKey, publicKey} = await generateKeyPair("ES256", {extractable: true});
+const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
 const privateJwk = JSON.stringify(await exportJWK(privateKey));
 const publicJwk = JSON.stringify(await exportJWK(publicKey));
 const proofIssuer = "https://proof-issuer.test.invalid";
@@ -78,7 +78,7 @@ export default defineConfig({
     // test in the file finishes in tens of milliseconds. The timeout has to clear that cold
     // start, not the steady-state cost, or the first test fails wherever the runner is slow.
     testTimeout: 60_000,
-    provide: {cybernestOsTestPrivateJwk: privateJwk},
+    provide: { cybernestOsTestPrivateJwk: privateJwk },
     // A rejected future capability is reported independently from the awaited pipelined call.
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {
@@ -93,12 +93,9 @@ export default defineConfig({
           : undefined;
       if (
         message !== undefined &&
-        (EXPECTED_MANAGER_KNOWLEDGE_ERRORS.has(message) ||
-          message.includes("This Manager runtime is private") ||
-          message.includes("A private Manager runtime cannot keep shared users") ||
-          message.includes("You don't have access to this workspace") ||
-          message.startsWith("capnweb-validate: refused ") ||
-          /^'[^']+' is not a function\.$/u.test(message))
+        (message.includes("abortAllDurableObjects") ||
+          message.includes("user-DO reset injected by test") ||
+          EXPECTED_MANAGER_KNOWLEDGE_ERRORS.has(message))
       ) {
         return false;
       }

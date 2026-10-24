@@ -10,9 +10,9 @@ import type {
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 
-// Covers which gadgets the editor offers "Update from blueprint" for, and what it does once that
-// has produced a proposal: the proposal lives in a new chat, which the editor has to bring into
-// view. Everything the editor composes is stubbed down to the callbacks that drive its layout.
+// Covers which gadgets the editor offers "Update from blueprint" for, and how the editor brings a
+// chat into view: the one a blueprint update was proposed in, or the one a notification opens.
+// Everything the editor composes is stubbed down to the callbacks that drive its layout.
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -29,7 +29,11 @@ const GADGET: GadgetSummary = { id: 1, type: 'gadget', title: 'Itinerary', commi
 const mocks = vi.hoisted(() => {
   const disposable = { [Symbol.dispose]() {} }
   return {
-    navigate: vi.fn<(options: { search: (prev: Record<string, unknown>) => unknown }) => void>(),
+    navigate: vi.fn<(options: {
+      search: (prev: Record<string, unknown>) => unknown
+      replace?: boolean
+    }) => void>(),
+    search: {} as Record<string, unknown>,
     workspace: {
       overseer: {
         stub: {
@@ -51,14 +55,17 @@ const mocks = vi.hoisted(() => {
       cancelObserverConfig: () => {},
       updateTitle: () => {},
     },
-    authenticatedApi: { whoami: async () => ({ type: 'user', id: 'dev', name: 'Dev' }) },
+    authenticatedApi: {
+      whoami: async () => ({ type: 'user', id: 'dev', name: 'Dev' }),
+      listGadgets: async () => [],
+    },
   }
 })
 
 vi.mock('@tanstack/react-router', () => ({
   useParams: () => ({ id: 'workspace' }),
   useNavigate: () => mocks.navigate,
-  useSearch: () => ({}),
+  useSearch: () => mocks.search,
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }))
 
@@ -82,7 +89,11 @@ vi.mock('@cloudflare/kumo', () => {
 vi.mock('./AuthContext', () => ({
   useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }),
 }))
-vi.mock('./RpcContext', () => ({ useConnectionLost: () => false, useRpcStub: () => ({}) }))
+vi.mock('./RpcContext', () => ({
+  useConnectionLost: () => false,
+  useRpcStub: () => ({}),
+  useBlueprintReader: () => null,
+}))
 vi.mock('./useWorkspaceOpen', () => ({ useWorkspaceOpen: () => mocks.workspace }))
 vi.mock('./useActions', () => ({ useActions: () => ({ pending: [] }), useActionEntries: () => {} }))
 vi.mock('./errorReporting', () => ({ reportIssue: () => {} }))
@@ -142,8 +153,10 @@ vi.mock('./components/ReconnectingChip', () => ({ default: () => null }))
 vi.mock('./components/SiteLogo', () => ({ default: () => null }))
 vi.mock('./components/UserMenu', () => ({ default: () => null }))
 vi.mock('./components/WorkspaceOpenErrorPage', () => ({ default: () => null }))
+vi.mock('./features/notifications/WorkspaceNotificationsMenu', () => ({ WorkspaceNotificationsMenu: () => null }))
 
 import GadgetEditor from './GadgetEditor'
+import { isChatVisible } from './features/notifications/visibleChat'
 
 let container: HTMLDivElement
 let root: Root
@@ -180,6 +193,7 @@ async function proposeUpdate() {
 
 beforeEach(() => {
   mocks.navigate.mockReset()
+  mocks.search = {}
   localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
@@ -259,5 +273,58 @@ describe('GadgetEditor, once a blueprint update is proposed', () => {
     await proposeUpdate()
 
     expect(currentView()).toEqual(['Preview'])
+  })
+})
+
+// A notification's "Open task" arrives as ?showChat.
+describe('GadgetEditor, opening a chat from a notification', () => {
+  it.each([
+    { screen: 'phone', view: 'Chat' },
+    { screen: 'desktop', view: 'Preview' },
+  ] as const)('shows the chat on a $screen, then drops the request', async ({ screen, view }) => {
+    mocks.search = { chat: 3, showChat: true }
+
+    await openEditor(screen)
+
+    expect(currentView()).toEqual([view])
+    const [{ search, replace }] = mocks.navigate.mock.calls.at(-1)!
+    expect(replace).toBe(true)
+    expect(search(mocks.search)).toEqual({ chat: 3, showChat: undefined })
+  })
+
+  it('leaves full-screen preview, which would cover the chat', async () => {
+    window.history.replaceState(null, '', '#fullscreen')
+    await openEditor('desktop')
+    const fullScreen = () => container.querySelector('[aria-label="Gadget full screen"]')
+    expect(fullScreen()).not.toBeNull()
+
+    // The router drops the hash with history.pushState, which fires no hashchange.
+    window.history.replaceState(null, '', window.location.pathname)
+    mocks.search = { chat: 3, showChat: true }
+    await openEditor('desktop')
+
+    expect(fullScreen()).toBeNull()
+  })
+
+  // Notifications skip only the chat the user can see.
+  it('reports its chat visible only when nothing covers it', async () => {
+    mocks.search = { chat: 3 }
+    await openEditor('phone')
+    expect(isChatVisible('workspace', 3)).toBe(false)
+    await click('Chat')
+    expect(isChatVisible('workspace', 3)).toBe(true)
+
+    act(() => root.unmount())
+    root = createRoot(container)
+    await openEditor('desktop')
+    expect(isChatVisible('workspace', 3)).toBe(true)
+
+    act(() => root.unmount())
+    expect(isChatVisible('workspace', 3)).toBe(false)
+    root = createRoot(container)
+    window.history.replaceState(null, '', '#fullscreen')
+    await openEditor('desktop')
+    expect(isChatVisible('workspace', 3)).toBe(false)
+    window.history.replaceState(null, '', window.location.pathname)
   })
 })

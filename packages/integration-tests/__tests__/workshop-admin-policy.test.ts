@@ -90,6 +90,21 @@ it("enforces deployment gatekeeper policy through the admin API", async () => {
     await expect(workspace.newGatekeeper(
         account.id, "https://gadgets-test.example/things/after")).rejects.toThrow(
         'The "Test Thing" resource is disabled on this deployment by an administrator.');
+    const model = models.script([
+      { toolCall: { id: "create-thing", name: "createExternalResource", arguments: {
+        vendorId: TEST_VENDOR_ID, resourceUrlPattern: "https://gadgets-test.example/things/*",
+        title: "Blocked", bindingName: "BLOCKED",
+      } } },
+      { text: "The creation was refused." },
+    ]);
+    await using creator = await openAgentSession(harness.url, {
+      modelId: SCRIPTED_MODEL_ID, userModel: model.userModel, usernamePrefix: "creator",
+    });
+    await creator.runTurn("Create a test thing.");
+    expect(model.requests[1]).toMatchObject({ messages: expect.arrayContaining([
+      expect.objectContaining({ role: "tool", tool_call_id: "create-thing", content:
+          expect.stringContaining('The "Test Thing" resource is disabled on this deployment') }),
+    ]) });
   } finally {
     try {
       await admin.setGatekeeperMode(TEST_VENDOR_ID, "optional");
@@ -98,6 +113,16 @@ it("enforces deployment gatekeeper policy through the admin API", async () => {
           TEST_VENDOR_ID, "https://gadgets-test.example/things/*", true);
     }
   }
+});
+
+// The harness sets no CLOUDFLARE_OS_DEPLOYMENT, so this is a deployment the deploy flow did not
+// install. Non-admins get no AdminApi at all, which the gatekeeper policy case asserts.
+it("reports no update status, and asks no deploy service, for a self-hosted deployment", async () => {
+  // getUpdateStatus() awaits any check it makes, and no model handler answers a deploy service,
+  // so a request would be recorded as unmocked before the call resolves.
+  const escapedBefore = network.getUnmockedCalls();
+  await expect(admin.getUpdateStatus()).resolves.toBeNull();
+  expect(network.getUnmockedCalls()).toEqual(escapedBefore);
 });
 
 it("deployment instructions and format hints reach the agent but not the user", async () => {

@@ -245,9 +245,23 @@ describe('GatewayModelRow', () => {
     })
   })
 
+  // Its Test would send a chat request, and its Settings only shape chats.
+  it('offers a decision model its modes, but no Test or Settings', async () => {
+    const clef: AdminModelView = {
+      ...SONNET, provider: 'cloudflare', id: '@cf/cloudflare/clef', name: 'Clef',
+      reasoningLevels: [], builtInReasoning: null,
+    }
+    await render({ model: clef }, { collapsed: true })
+
+    expect(document.body.querySelector('li')!.textContent).toContain('Decision')
+    expect(() => testButton('Clef')).toThrow('No Test button')
+    expect(() => button('Settings for Clef')).toThrow('No button')
+    expect(document.body.querySelectorAll('[role="radio"]')).toHaveLength(3)
+  })
+
   describe('the reasoning level', () => {
     it.each<[BuiltInReasoning, string]>([
-      ['adaptive', 'Deployment default (built-in: Adaptive)'],
+      ['adaptive', 'Deployment default (built-in: Provider default)'],
       ['medium', 'Deployment default (built-in: Medium)'],
       ['xhigh', 'Deployment default (built-in: Extra high)'],
       [null, 'Deployment default (built-in: no level sent)'],
@@ -276,12 +290,12 @@ describe('GatewayModelRow', () => {
     it('follows the built-in the server reports for the model, and the deployment default over it', async () => {
       const { show } = await render({ model: SONNET })
       const reads: [Shown, string][] = [
-        [{ model: SONNET }, 'Deployment default (built-in: Adaptive)'],
+        [{ model: SONNET }, 'Deployment default (built-in: Provider default)'],
         [{ model: { ...SONNET, builtInReasoning: 'medium' } }, 'Deployment default (built-in: Medium)'],
         [{ model: { ...SONNET, builtInReasoning: null } }, 'Deployment default (built-in: no level sent)'],
         [{ model: { ...SONNET, builtInReasoning: null }, defaultReasoning: 'high' },
           'Deployment default (High)'],
-        [{ model: SONNET }, 'Deployment default (built-in: Adaptive)'],
+        [{ model: SONNET }, 'Deployment default (built-in: Provider default)'],
       ]
 
       for (const [shown, label] of reads) {
@@ -317,7 +331,7 @@ describe('GatewayModelRow', () => {
       expect(onSettingsChange).toHaveBeenCalledExactlyOnceWith(sent)
       expect(Object.keys(onSettingsChange.mock.calls[0][0])).toEqual(Object.keys(sent))
       // The server's value is what the select shows, and the re-read is what changes it.
-      expect(levelSelect().textContent).toBe('Deployment default (built-in: Adaptive)')
+      expect(levelSelect().textContent).toBe('Deployment default (built-in: Provider default)')
     })
 
     it('replaces the model’s level', async () => {
@@ -337,7 +351,7 @@ describe('GatewayModelRow', () => {
     ])('clears the level by choosing the deployment default, %s', async (_case, settings, sent) => {
       const { onSettingsChange } = await render({ model: { ...SONNET, settings } })
 
-      await choose(levelSelect(), 'Deployment default (built-in: Adaptive)')
+      await choose(levelSelect(), 'Deployment default (built-in: Provider default)')
 
       expect(onSettingsChange).toHaveBeenCalledExactlyOnceWith(sent)
       expect(Object.keys(onSettingsChange.mock.calls[0][0])).toEqual(Object.keys(sent))
@@ -654,7 +668,7 @@ describe('GatewayModelRow', () => {
     it('offers no budget for a model whose window leaves a prompt no room', async () => {
       await render({ model: { ...SONNET, builtInCompactionInputBudget: 0, maxCompactionInputBudget: 0 } })
 
-      expect(levelSelect().textContent).toBe('Deployment default (built-in: Adaptive)')
+      expect(levelSelect().textContent).toBe('Deployment default (built-in: Provider default)')
       expect(() => budgetField()).toThrow('No budget field')
       expect(buttons()).not.toContain('Save the compaction budget of Claude Sonnet')
     })

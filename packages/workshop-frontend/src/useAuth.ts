@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { NativeConnectSession } from './features/native-app/connectSession'
+import { useRpcContext } from './RpcContext'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
@@ -14,7 +16,18 @@ interface AuthState {
 
 export { CF_ACCESS_MODE }
 
-export function useAuth(publicApi: RpcStub<PublicApi>) {
+const noChange = () => () => {}
+
+export function useAuth(publicApi?: RpcStub<PublicApi>) {
+  const rpcContext = useRpcContext()
+  const owner = rpcContext?.mode === 'cybernest' ? rpcContext.owner : null
+  const cybernestSnapshot = useSyncExternalStore(
+    owner?.subscribe ?? noChange,
+    owner?.getSnapshot ?? (() => null),
+    owner?.getSnapshot ?? (() => null),
+  )
+  const nativeApi = publicApi ?? (rpcContext?.mode === 'native' ? rpcContext.stub : undefined)
+  const [nativeConnectSession] = useState(() => new NativeConnectSession())
   const [authState, setAuthState] = useState<AuthState>({
     token: null,
     authenticatedApi: null,
@@ -45,17 +58,20 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
    * away must not blank an identity the outer still holds. `logout` is the only thing that clears.
    */
   useEffect(() => {
-    const authenticatedApi = authState.authenticatedApi
+    const authenticatedApi = owner ? cybernestSnapshot?.authenticatedApi ?? null : authState.authenticatedApi
     if (!authenticatedApi) return
     let cancelled = false
-    authenticatedApi.whoami().then((info) => {
+    const identity = authenticatedApi.whoami()
+    const untrack = owner ? () => {} : nativeConnectSession.track(authenticatedApi, identity)
+    identity.then((info) => {
       // Only a real user account names a person: for a gadget author `id` is its owner's id.
       if (!cancelled && info.type === 'user') setReportedUserId(info.id)
     }).catch(() => {})
-    return () => { cancelled = true }
-  }, [authState.authenticatedApi])
+    return () => { cancelled = true; untrack() }
+  }, [authState.authenticatedApi, cybernestSnapshot, nativeConnectSession, owner])
 
   useEffect(() => {
+    if (owner || !nativeApi) return
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
     } else {
@@ -71,7 +87,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
       authenticatedApiRef.current?.[Symbol.dispose]()
     }
-  }, [publicApi])
+  }, [nativeApi, owner])
 
   const authenticateWithCfAccess = () => {
     setAuthState(prev => {
@@ -84,7 +100,8 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     // Use promise pipelining - no need to await. The CF Access JWT is already attached
     // to the request by the browser (injected by the Access service worker/cookie), so
     // the server validates it and returns an authenticated stub immediately.
-    const authenticatedApi = publicApi.authenticateFromCfAccess()
+    if (!nativeApi) return
+    const authenticatedApi = nativeApi.authenticateFromCfAccess()
     setAuthState({
       token: null,
       authenticatedApi,
@@ -109,7 +126,8 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
 
     // Use promise pipelining - we can use the returned promise as a stub immediately
     // without awaiting. Authentication errors will be handled when the stub is actually used.
-    const authenticatedApi = publicApi.authenticate(token)
+    if (!nativeApi) return
+    const authenticatedApi = nativeApi.authenticate(token)
     setAuthState({
       token,
       authenticatedApi,
@@ -119,11 +137,24 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const login = (token: string) => {
+    if (owner) return
     authenticateWithToken(token)
   }
 
   const logout = () => {
     setReportedUserId(undefined)
+
+    if (owner) {
+      owner.stop()
+      localStorage.removeItem('authToken')
+      const form = document.createElement('form')
+      form.method = 'post'
+      form.action = '/auth/logout'
+      form.hidden = true
+      document.body.append(form)
+      form.submit()
+      return
+    }
 
     if (CF_ACCESS_MODE) {
       window.location.assign('/cdn-cgi/access/logout')
@@ -146,10 +177,17 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     localStorage.removeItem('authToken')
   }
 
+  const effectiveAuthState = owner ? {
+    token: null,
+    authenticatedApi: cybernestSnapshot?.authenticatedApi ?? null,
+    isLoading: cybernestSnapshot?.status === 'connecting',
+    error: null,
+  } : authState
+
   return {
-    ...authState,
+    ...effectiveAuthState,
     login,
     logout,
-    isAuthenticated: !!authState.authenticatedApi
+    isAuthenticated: !!effectiveAuthState.authenticatedApi,
   }
 }

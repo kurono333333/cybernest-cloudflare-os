@@ -1,9 +1,10 @@
-import { StrictMode, useState, useEffect } from 'react'
+import { StrictMode, useState, useEffect, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcPromise, RpcStub, newWebSocketRpcSession } from 'capnweb'
-import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
-import { RpcContext } from './RpcContext'
+import { CybernestConnectionBootstrapApi, PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
+import { CYBERNEST_MODE, RpcContext } from './RpcContext'
+import { createCybernestConnectionOwner, CybernestConnectionOwner } from './features/cybernest/connectionOwner'
 import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
@@ -165,14 +166,16 @@ async function probeOnWake() {
   }
 }
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') void probeOnWake();
-});
-window.addEventListener('online', () => void probeOnWake());
+function installNativeWakeListeners() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void probeOnWake();
+  });
+  window.addEventListener('online', () => void probeOnWake());
+}
 
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
-let currentStub = startConnection();
+let currentStub: RpcStub<PublicApi>
 
 const router = createRouter()
 applyStoredThemeMode()
@@ -243,7 +246,7 @@ function AppWithConnection() {
 
   return (
     <ThemeProvider>
-      <RpcContext.Provider value={rpcState}>
+      <RpcContext.Provider value={{ mode: 'native', ...rpcState }}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
           <ServerConfigContext.Provider value={serverConfig}>
             <div className="app-viewport flex min-w-0 flex-col overflow-hidden">
@@ -259,22 +262,84 @@ function AppWithConnection() {
   );
 }
 
+function CybernestApp({ owner }: { owner: CybernestConnectionOwner }) {
+  const snapshot = useSyncExternalStore(owner.subscribe, owner.getSnapshot, owner.getSnapshot)
+  const serverConfig = snapshot.status === 'authenticated' ? snapshot.serverConfig : null
+  const serverConfigError = snapshot.status === 'stopped' && snapshot.reason !== 'unauthenticated'
+
+  useEffect(() => {
+    const wake = () => {
+      if (document.visibilityState === 'visible') void owner.wake()
+    }
+    document.addEventListener('visibilitychange', wake)
+    window.addEventListener('online', wake)
+    return () => {
+      document.removeEventListener('visibilitychange', wake)
+      window.removeEventListener('online', wake)
+    }
+  }, [owner])
+
+  useEffect(() => {
+    applyAccentColor(serverConfig?.accentColor ?? '')
+  }, [serverConfig?.accentColor])
+
+  const siteLogoUrl = serverConfig?.siteLogo?.url
+    ? cacheBustSiteLogoUrl(serverConfig.siteLogo.url)
+    : undefined
+  useEffect(() => applySiteFavicon(siteLogoUrl), [siteLogoUrl])
+
+  return (
+    <ThemeProvider>
+      <RpcContext.Provider value={{ mode: 'cybernest', owner }}>
+        <ServerConfigErrorContext.Provider value={serverConfigError}>
+          <ServerConfigContext.Provider value={serverConfig}>
+            <div className="app-viewport flex min-w-0 flex-col overflow-hidden">
+              <AnnouncementBanner />
+              <div className="h-full min-h-0 flex-1">
+                <RouterProvider router={router} />
+              </div>
+            </div>
+          </ServerConfigContext.Provider>
+        </ServerConfigErrorContext.Provider>
+      </RpcContext.Provider>
+    </ThemeProvider>
+  )
+}
+
 const root = createRoot(document.getElementById('root')!, {
   onUncaughtError: (error) => reportIssue('workshop.react-root', error, {
     handled: false, severity: 'fatal', captureMechanism: 'react',
   }),
 })
 
-// Kick off dev auto-login in the background. If it completes before
-// useAuth checks the token, the user skips the login page. If the backend
-// is unreachable, the app still renders immediately (showing a connection
-// banner or login page) instead of hanging on a blank screen.
-devAutoLogin(currentStub).catch(() => {})
-
-root.render(
-  <StrictMode>
-    <FrontendErrorBoundary>
-      <AppWithConnection />
-    </FrontendErrorBoundary>
-  </StrictMode>
-)
+if (CYBERNEST_MODE) {
+  const owner = createCybernestConnectionOwner({
+    fetch: globalThis.fetch.bind(globalThis),
+    createSession: () => {
+      const apiHost = getBackendHost()
+      const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api'
+      return newWebSocketRpcSession<CybernestConnectionBootstrapApi>(wsUrl)
+    },
+  })
+  void owner.start()
+  root.render(
+    <StrictMode>
+      <FrontendErrorBoundary>
+        <CybernestApp owner={owner} />
+      </FrontendErrorBoundary>
+    </StrictMode>
+  )
+} else {
+  currentStub = startConnection()
+  installNativeWakeListeners()
+  // A development token is established in the background so an unreachable backend does not
+  // block the initial native Workshop render.
+  devAutoLogin(currentStub).catch(() => {})
+  root.render(
+    <StrictMode>
+      <FrontendErrorBoundary>
+        <AppWithConnection />
+      </FrontendErrorBoundary>
+    </StrictMode>
+  )
+}
