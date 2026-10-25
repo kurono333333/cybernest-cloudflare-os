@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72",
+  "packageManager": "pnpm@11.28.7+sha512.2161a30a2dc64b0c0f09786496fbce5f061be96b8ff11f0bc98e6bc675e0074ceb225b9197a278f2f171e6c9fb971bd1df8932e5bc31053baccdd52b15a1ae26",
   "scripts": {
     "build": "node scripts/vp/run.ts --filter=!cloudflare-os --cache build",
     "run-local": "node scripts/run-local.ts",
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
+    "@vitest/browser-playwright": "catalog:",
     "@types/node": "26.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",

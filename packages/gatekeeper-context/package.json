@@ -20,12 +20,12 @@
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
-    "isomorphic-git": "^1.43.1",
+    "isomorphic-git": "1.44.3",
     "yaml": "^2.9.1",
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/kumo": "^2.14.0",
+    "@cloudflare/kumo": "^2.15.0",
     "@cloudflare/vitest-plugin": "catalog:",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-javascript": "^6.2.5",
