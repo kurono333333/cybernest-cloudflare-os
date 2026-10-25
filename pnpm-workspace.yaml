@@ -7,8 +7,8 @@ packages:
 # The toolchain versions every package shares. Declared once here so a bump is one edit rather than
 # needing to hand edit a bunch of different package.json files.
 catalog:
-  '@cloudflare/vitest-plugin': ^1.4.3
-  '@cloudflare/workers-types': ^5.20261001.1
+  '@cloudflare/vitest-plugin': 1.4.6
+  '@cloudflare/workers-types': 5.20261019.1
   capnweb: ^0.12.0
   # jsdiff: line diffs in workshop-backend (formatUnifiedDiff) and gatekeeper-kit's git-diff (the
   # simulated PR/MR diff's hunks, used by the git-host gatekeepers). One catalog entry so the two
@@ -17,7 +17,7 @@ catalog:
   # Exact: pinned in lockstep with capnweb (declared as a >=0.7.0 peer)
   capnweb-validate: 0.3.0
   # Exact: a prerelease, kept in step with the Wrangler/workerd stack the test pool runs on.
-  miniflare: 5.20261001.0-alpha
+  miniflare: 5.20261019.1-beta
   # Exact: TypeScript 7 (tsgo). Type-checking runs on the native compiler. Build-time
   # transpilers that need the JS compiler API (scripts/build-gatekeeper-configurator.ts)
   # use the "typescript6" npm alias below instead; capnweb-validate
@@ -32,15 +32,15 @@ catalog:
   # Oxc's `decorator: { legacy: true }` does load them, but with TypeScript-legacy semantics that
   # differ from the Stage-3 lowering wrangler deploys, so it only works while capnweb-validate's
   # decorators ignore their `context` argument.
-  vite: 7.3.6
-  vite-plus: ^1.2.0
+  vite: 7.3.7
+  vite-plus: 1.3.0
   vitest: ^5.0.5
   # Vitest's browser-mode provider, which must match vitest's version, and the Playwright it
   # drives. Playwright's browsers are not dependencies: `playwright install chromium` fetches them.
   '@vitest/browser-playwright': ^5.0.5
   playwright: ^1.64.0
-  wrangler: ^4.147.0
-  zod: ^4.6.5
+  wrangler: 4.151.3
+  zod: 4.6.6
 
 overrides:
   # Keep the test pool's Wrangler/Miniflare/workerd stack aligned with the workspace toolchain.
@@ -57,6 +57,12 @@ overrides:
   # mature release (CI verifies every lockfile entry against the release-age policy):
   # - @types/node arrives as an optional vite/vitest peer resolved to `latest`.
   # - @lezer/markdown is a deep transitive of @codemirror/lang-markdown.
+  'undici@^7': 7.30.1
+  zod: 4.6.6
+  'nanoid@^3': 3.3.20
+  'source-map-js@^1': 1.2.2
+  'sharp@^0.35': 0.35.5
+  'ip-address@^10': 10.7.4
   '@types/node': 26.1.0
   '@lezer/markdown': 1.6.4
 

@@ -18,7 +18,7 @@
     "test:run": "vitest run && vitest run -c vitest.browser.config.ts"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^2.14.0",
+    "@cloudflare/kumo": "^2.15.0",
     "@gadgets/error-reporting": "workspace:*",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/node": "^4.3.3",
